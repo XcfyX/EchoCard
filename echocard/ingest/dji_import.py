@@ -76,6 +76,7 @@ class DeviceImporter:
 
         report = ImportReport()
         root = Path(vol.root)
+        self._cleanup_stale_tmp(root)
         try:
             wavs = self._scan_wavs(root)
         except OSError as e:
@@ -109,6 +110,16 @@ class DeviceImporter:
         return report
 
     # ------------------------------------------------------------------ 扫描
+    def _cleanup_stale_tmp(self, root: Path) -> None:
+        """清理历史中断遗留的临时文件（临时名含创建进程 PID）。"""
+        for p in root.rglob(".tmp-*"):
+            try:
+                if p.is_file() and int(p.name.split("-")[1]) != os.getpid():
+                    p.unlink(missing_ok=True)
+                    log.info("清理历史中断临时文件：%s", p.name)
+            except (ValueError, OSError):
+                continue
+
     def _scan_wavs(self, root: Path) -> list[Path]:
         out: list[Path] = []
         for dirpath, dirnames, filenames in os.walk(root):
@@ -156,6 +167,15 @@ class DeviceImporter:
         except OSError as e:
             report.failed += 1
             report.errors.append(f"{src.name}: 无法读取文件大小（{e}）")
+            return
+        # 快速去重：同路径+同大小视为已导入（此前已做过 SHA-256 全量校验），
+        # 避免在慢速 USB 设备上重复读取上 GB 的文件
+        if self.db.query_one(
+            "SELECT 1 FROM ingest_files WHERE src_path=? AND size_bytes=? AND status != 'failed'",
+            (str(src), src_size),
+        ):
+            report.skipped_dedup += 1
+            log.info("%s 已导入过（路径+大小快速去重，跳过重读）", src.name)
             return
         if src_size == 0:
             report.failed += 1
