@@ -111,10 +111,11 @@ def import_summary(db: Database, cfg: AppConfig, md_text: str,
     )
     summary_id = cur.lastrowid
     for t in todos:
-        db.execute(
+        todo_cur = db.execute(
             "INSERT INTO todos(summary_id, content, done, created_at) VALUES(?,?,0,?)",
             (summary_id, t, now_iso()),
         )
+        fts_insert(db, "todo", day, t, f"todo:{todo_cur.lastrowid}")
     fts_insert(db, "summary", day, f"{body} {' '.join(tags)} {' '.join(facts)}")
     log.info("AI 总结已回流：%s（todos=%d, tags=%d, source=%s）", day, len(todos), len(tags), source)
     return {"ok": True, "summary_id": summary_id, "day": day,
