@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EchoCard 控制台</title>
+<style>
+  :root[data-theme="dark"] {
+    --bg:#0f1115; --panel:#171a21; --panel2:#10131a; --line:#262b36;
+    --text:#e6e8ee; --muted:#8b93a5; --accent:#5b7cfa; --ok:#5dd39e; --warn:#d9b44a; --err:#e5645d;
+  }
+  :root[data-theme="light"] {
+    --bg:#f6f7fa; --panel:#ffffff; --panel2:#f1f3f8; --line:#e3e6ee;
+    --text:#1c2230; --muted:#6b7385; --accent:#4061e8; --ok:#1d9e6a; --warn:#a97b14; --err:#cc4a44;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg);
+         color:var(--text); padding:28px; }
+  .wrap { max-width:980px; margin:0 auto; }
+  header { display:flex; align-items:center; gap:14px; margin-bottom:22px; }
+  h1 { font-size:22px; margin:0; letter-spacing:.5px; }
+  .badge { font-size:12px; color:var(--muted); border:1px solid var(--line);
+           border-radius:999px; padding:3px 10px; }
+  .spacer { flex:1; }
+  button, select { background:var(--panel2); color:var(--text); border:1px solid var(--line);
+                   border-radius:10px; padding:9px 14px; font-size:13px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .banner { border-radius:12px; padding:12px 16px; font-size:13px; margin-bottom:18px;
+            border:1px solid var(--line); background:var(--panel2); color:var(--muted); }
+  .banner.danger { border-color:var(--err); color:var(--err); background:transparent; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px;
+          padding:18px; box-shadow:0 6px 24px rgba(0,0,0,.18); }
+  .card h2 { font-size:14px; margin:0 0 12px; color:var(--muted); font-weight:600;
+             text-transform:uppercase; letter-spacing:1px; }
+  .stat { font-size:26px; font-weight:700; margin:2px 0 6px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line);
+          white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; }
+  #log { font-family:Consolas,monospace; font-size:12px; max-height:320px; overflow:auto; }
+  #log div { padding:3px 4px; border-bottom:1px dashed var(--line); }
+  .ts { color:var(--muted); }
+  .topic { color:var(--accent); }
+  label.switch { display:flex; gap:8px; align-items:center; font-size:13px; margin:6px 0; }
+  a { color:var(--accent); text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>EchoCard</h1><span class="badge" id="ver">v?</span>
+    <span class="spacer"></span>
+    <a href="/upload" target="_blank"><button>📱 扫码传图页</button></a>
+    <button id="scan">🔍 立即扫描 USB</button>
+    <button id="toggleTheme">🌗 主题</button>
+  </header>
+
+  <div class="banner" id="deleteBanner">设备清空开关：关闭（导入后源文件全部保留）</div>
+
+  <div class="grid">
+    <div class="card"><h2>已导入音频</h2><div class="stat" id="cAudio">–</div>
+      <div class="muted">个 WAV 文件（SHA-256 去重）</div></div>
+    <div class="card"><h2>已归档照片</h2><div class="stat" id="cPhotos">–</div>
+      <div class="muted">张（含压缩图）</div></div>
+    <div class="card"><h2>记忆天数</h2><div class="stat" id="cDays">–</div>
+      <div class="muted">天（按录音归属日期）</div></div>
+    <div class="card"><h2>数据目录</h2><div class="stat" id="dataRoot" style="font-size:15px">–</div>
+      <div class="muted">录音 / 照片 / 数据库 / 导出包均在此</div></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>绑定设备</h2>
+    <table id="devices"><thead><tr>
+      <th>ID</th><th>类型</th><th>序列号</th><th>VID</th><th>卷标</th><th>最近在线</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <div style="margin-top:10px;color:var(--muted);font-size:12px">
+      绑定向导：插入设备 → 「立即扫描 USB」→ 对未绑定设备调用 <code>POST /api/v1/usb/{盘符}/bind</code>
+      （M4 将提供图形向导）
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h2>后台事件日志</h2>
+    <div id="log"></div>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+async function refresh(){
+  try{
+    const s=await (await fetch('/api/v1/status')).json();
+    $('ver').textContent='v'+s.version; $('dataRoot').textContent=s.data_root;
+    $('cAudio').textContent=s.counts.audio_files; $('cPhotos').textContent=s.counts.photos;
+    $('cDays').textContent=s.counts.days;
+    const b=$('deleteBanner');
+    if(s.delete_after_verify){b.className='banner danger';
+      b.textContent='⚠ 设备清空开关：开启（校验+落库成功后自动删除设备源文件）';}
+    else{b.className='banner';b.textContent='设备清空开关：关闭（导入后源文件全部保留）';}
+    const tb=$('devices').querySelector('tbody');tb.innerHTML='';
+    for(const d of s.devices){
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td>${d.id}</td><td>${d.kind}</td><td>${d.serial||'-'}</td>
+        <td>${d.vid||'-'}</td><td>${d.volume_label||'-'}</td><td>${d.last_seen||'-'}</td>
+        <td><a href="#" onclick="unbind(${d.id});return false;">解绑</a></td>`;
+      tb.appendChild(tr);
+    }
+    const lg=await (await fetch('/api/v1/ingest/log?limit=60')).json();
+    $('log').innerHTML=lg.log.map(e=>
+      `<div><span class="ts">${e.ts}</span> <span class="topic">${e.topic}</span> `+
+      JSON.stringify(e.data).slice(0,180)+`</div>`).join('')||'<div>暂无事件</div>';
+  }catch(e){$('log').innerHTML='<div>服务连接失败</div>';}
+}
+async function unbind(id){ if(confirm('解绑设备 #'+id+'？（设备上的 .echocard_source 标记保留）'))
+  await fetch('/api/v1/devices/'+id,{method:'DELETE'}); refresh(); }
+$('scan').onclick=async()=>{ await fetch('/api/v1/usb/scan'); refresh(); };
+$('toggleTheme').onclick=()=>{
+  const r=document.documentElement;
+  r.dataset.theme = r.dataset.theme==='dark'?'light':'dark';
+  fetch('/api/v1/config',{method:'PATCH',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({theme:r.dataset.theme})});
+};
+refresh(); setInterval(refresh,3000);
+</script>
+</body></html>
