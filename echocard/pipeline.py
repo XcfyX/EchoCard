@@ -282,6 +282,12 @@ class Pipeline:
             "speakers": len(speakers_view), "keep_raw": keep_raw,
             "failed_files": failed_files,
         })
+        try:  # 新片段纳入全文检索
+            from .core.fts import rebuild_fts
+
+            rebuild_fts(self.db)
+        except Exception:
+            log.exception("FTS 重建失败")
         return {"ok": True, "day": day, "segments": len(speech_all),
                 "speakers": len(speakers_view), "failed_files": failed_files,
                 "keep_raw": keep_raw}
