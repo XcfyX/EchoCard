@@ -124,3 +124,6 @@ CREATE TABLE IF NOT EXISTS todos (
     due        TEXT,
     created_at TEXT NOT NULL
 );
+
+-- ===== FTS5 全文检索（CJK 双字分词，见 core/fts.py；ref 为不参与索引的辅助列）=====
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_memory USING fts5(kind UNINDEXED, day_range UNINDEXED, text, ref UNINDEXED, tokenize='unicode61');

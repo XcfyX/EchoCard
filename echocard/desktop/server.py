@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 EDITABLE_FIELDS = {
     "data_root", "server_port", "delete_after_verify", "auto_bind_dji",
     "proxy_url", "watched_photo_dirs", "auto_music_recognition", "theme",
+    "export_prompt", "auto_transcribe_since", "auto_pipeline",
+    "pipeline_provider", "cluster_distance_threshold", "cleanup_after_summary",
 }
 
 
@@ -41,7 +43,11 @@ class ConfigPatch(BaseModel):
     watched_photo_dirs: list[str] | None = None
     auto_music_recognition: bool | None = None
     theme: str | None = None
+    export_prompt: str | None = None
     auto_transcribe_since: str | None = None
+    api_base_url: str | None = None
+    api_key: str | None = None
+    api_model: str | None = None
     auto_pipeline: bool | None = None
     pipeline_provider: str | None = None
     cluster_distance_threshold: float | None = None
@@ -62,6 +68,28 @@ class MusicRangeBody(BaseModel):
     day: str
     start: str
     end: str
+
+
+class ExportBody(BaseModel):
+    days: list[str]
+
+
+class ReflowTextBody(BaseModel):
+    text: str
+    day: str | None = None
+
+
+class TodoToggleBody(BaseModel):
+    done: bool
+
+
+class StarBody(BaseModel):
+    starred: bool
+
+
+class CleanupBody(BaseModel):
+    day: str
+    keep_unrecognized_music: bool = True
 
 
 def create_app(
@@ -108,7 +136,9 @@ def create_app(
     # ---- 配置 ----
     @app.get("/api/v1/config")
     def get_config() -> dict:
-        return asdict(cfg)
+        data = asdict(cfg)
+        data["api_key"] = "••• 已配置" if cfg.api_key else ""  # 绝不回传真实 Key
+        return data
 
     @app.patch("/api/v1/config")
     def patch_config(patch: ConfigPatch) -> dict:
@@ -286,6 +316,141 @@ def create_app(
         from ..audio.music_id import recognize_time_range
 
         return recognize_time_range(db, cfg, body.day, body.start, body.end)
+
+    # ================= M3：导出投喂包 / 回流 / 检索 / 清理 / API 总结 =================
+    @app.post("/api/v1/export")
+    def export_feedpack(body: ExportBody) -> dict:
+        from ..export.feedpack import export_days
+
+        for d in body.days:
+            _valid_day(d)
+        return export_days(db, cfg, body.days)
+
+    @app.get("/api/v1/export/preview")
+    def export_preview(days: str) -> dict:
+        """days=2026-11-22,2026-11-23 → 返回投喂 Markdown 预览与一键复制文本。"""
+        from ..export.feedpack import build_markdown
+
+        day_list = [d.strip() for d in days.split(",") if d.strip()]
+        for d in day_list:
+            _valid_day(d)
+        md, _photos = build_markdown(db, cfg, day_list)
+        return {"markdown": md, "days": day_list}
+
+    @app.post("/api/v1/reflow/zip")
+    async def reflow_zip(request: Request) -> dict:
+        from ..export.reflow import import_from_zip
+        from ..export.cleanup import auto_cleanup_if_enabled
+
+        body = await request.body()
+        try:
+            result = import_from_zip(db, cfg, body)
+        except Exception as e:
+            raise HTTPException(400, f"回流解析失败：{e}")
+        auto_cleanup_if_enabled(db, cfg, result["day"])
+        return result
+
+    @app.post("/api/v1/reflow/md")
+    def reflow_md_file(request: Request) -> dict:
+        from ..export.reflow import import_summary
+        from ..export.cleanup import auto_cleanup_if_enabled
+
+        text = (request.query_params.get("text")
+                or request.headers.get("X-Reflow-Text") or "")
+        if not text:
+            raise HTTPException(400, "缺少 Markdown 文本")
+        result = import_summary(db, cfg, text, source="reflow_md")
+        auto_cleanup_if_enabled(db, cfg, result["day"])
+        return result
+
+    @app.post("/api/v1/reflow/text")
+    def reflow_text(body: ReflowTextBody) -> dict:
+        """通道 3：Ctrl+V 粘贴 AI 回复文本。"""
+        from ..export.reflow import import_summary
+        from ..export.cleanup import auto_cleanup_if_enabled
+
+        if not body.text.strip():
+            raise HTTPException(400, "粘贴内容为空")
+        text = body.text
+        if body.day:
+            _valid_day(body.day)
+            if "date:" not in text:
+                text = f"---\ndate: {body.day}\n---\n" + text
+        result = import_summary(db, cfg, text, source="reflow_paste")
+        auto_cleanup_if_enabled(db, cfg, result["day"])
+        return result
+
+    @app.get("/api/v1/summaries")
+    def summaries_list() -> dict:
+        return {"summaries": [dict(r) for r in db.query(
+            "SELECT id, day_range, tags, todos_json, facts, music, source, imported_at"
+            " FROM daily_summaries ORDER BY day_range DESC")]}
+
+    @app.get("/api/v1/summary/{summary_id}")
+    def summary_detail(summary_id: int) -> dict:
+        row = db.query_one("SELECT * FROM daily_summaries WHERE id=?", (summary_id,))
+        if row is None:
+            raise HTTPException(404, "总结不存在")
+        data = dict(row)
+        data["todos"] = [dict(t) for t in db.query(
+            "SELECT * FROM todos WHERE summary_id=? ORDER BY id", (summary_id,))]
+        return data
+
+    @app.post("/api/v1/todos/{todo_id}/toggle")
+    def todo_toggle(todo_id: int, body: TodoToggleBody) -> dict:
+        db.execute("UPDATE todos SET done=? WHERE id=?",
+                   (1 if body.done else 0, todo_id))
+        return {"ok": True}
+
+    @app.get("/api/v1/search")
+    def global_search(q: str, limit: int = 30) -> dict:
+        from ..core.fts import search as fts_search
+
+        return {"results": fts_search(db, q, limit)}
+
+    @app.post("/api/v1/segments/{segment_id}/star")
+    def segment_star(segment_id: int, body: StarBody) -> dict:
+        db.execute("UPDATE audio_segments SET starred=? WHERE id=?",
+                   (1 if body.starred else 0, segment_id))
+        return {"ok": True}
+
+    @app.post("/api/v1/cleanup")
+    def cleanup_day_api(body: CleanupBody) -> dict:
+        _valid_day(body.day)
+        from ..export.cleanup import cleanup_day
+
+        return cleanup_day(db, cfg, body.day, body.keep_unrecognized_music)
+
+    @app.get("/api/v1/llm/status")
+    def llm_status() -> dict:
+        from ..llm_client import api_ready
+
+        return {"available": api_ready(cfg), "model": cfg.api_model,
+                "base_url": cfg.api_base_url}
+
+    @app.post("/api/v1/llm/summary/{day}")
+    def llm_summary(day: str) -> dict:
+        """可选 API 一键总结：发送当日投喂内容 + 压缩照片 → 自动回流入库。"""
+        _valid_day(day)
+        from ..export.feedpack import build_markdown
+        from ..export.cleanup import auto_cleanup_if_enabled
+        from ..export.reflow import import_summary
+        from ..llm_client import chat, api_ready
+        import io as _io
+        from PIL import Image as _Image
+
+        if not api_ready(cfg):
+            raise HTTPException(400, "API Key 未配置（设置页填写 Base URL / Key / 模型）")
+        md, _refs = build_markdown(db, cfg, [day])
+        photos = [Path(r["compressed_path"]) for r in db.query(
+            "SELECT compressed_path FROM photos WHERE captured_at=?"
+            " AND include_in_export=1 ORDER BY captured_ts", (day,))
+            if Path(r["compressed_path"]).exists()]
+        reply = chat(cfg, md, images=photos)
+        result = import_summary(db, cfg, reply, source="api")
+        auto_cleanup_if_enabled(db, cfg, day)
+        return {"ok": True, "day": day, "summary_id": result["summary_id"],
+                "reply_chars": len(reply), "photos_sent": len(photos[:12])}
 
     # ---- 最小控制台（M4 替换为完整 UI）----
     webui = Path(__file__).resolve().parent.parent / "webui"

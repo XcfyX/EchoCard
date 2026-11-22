@@ -59,6 +59,14 @@ class AppConfig:
     # ---- UI（M4 使用）----
     theme: str = "dark"  # dark / light
 
+    # ---- 导出（M3）：投喂 Prompt 模板（留空使用内置默认，可自由编辑）----
+    export_prompt: str = ""
+
+    # ---- 可选 API 一键总结（M3）：留空 API Key 时完全隐藏/静默 ----
+    api_base_url: str = "https://open.bigmodel.cn/api/paas/v4"  # 智谱 GLM（OpenAI 兼容）占位
+    api_key: str = ""        # 仅存本地 config（仓库外），绝不入库
+    api_model: str = "glm-4.5v"
+
     @classmethod
     def load(cls, path: Path | None = None) -> "AppConfig":
         path = path or default_config_path()

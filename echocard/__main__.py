@@ -42,6 +42,12 @@ def main() -> None:
     events = EventBus()
     importer = DeviceImporter(db, cfg, events)
 
+    from .core.fts import rebuild_fts
+
+    indexed = rebuild_fts(db)
+    if indexed:
+        log.info("FTS5 全文索引就绪：%d 条记录", indexed)
+
     from .pipeline import Pipeline
 
     pipeline = Pipeline(db, cfg, events)
