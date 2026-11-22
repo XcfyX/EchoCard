@@ -6,7 +6,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
@@ -19,6 +19,7 @@ from ..ingest.usb_monitor import UsbMonitor
 from ..ingest.usb_volumes import list_usb_volumes
 from ..ingest.device_binding import bind_volume_manually
 from ..ingest.lan_upload import router as lan_router
+from ..pipeline import Pipeline
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,27 @@ class ConfigPatch(BaseModel):
     watched_photo_dirs: list[str] | None = None
     auto_music_recognition: bool | None = None
     theme: str | None = None
+    auto_transcribe_since: str | None = None
+    auto_pipeline: bool | None = None
+    pipeline_provider: str | None = None
+    cluster_distance_threshold: float | None = None
+    cleanup_after_summary: bool | None = None
+
+
+class RenameBody(BaseModel):
+    name: str
+
+
+class MergeBody(BaseModel):
+    keep_id: int
+    gone_id: int
+    name: str | None = None
+
+
+class MusicRangeBody(BaseModel):
+    day: str
+    start: str
+    end: str
 
 
 def create_app(
@@ -49,6 +71,7 @@ def create_app(
     importer: DeviceImporter,
     watcher: PhotoWatcher | None = None,
     monitor: UsbMonitor | None = None,
+    pipeline: Pipeline | None = None,
 ) -> FastAPI:
     app = FastAPI(title="EchoCard", version=APP_VERSION, docs_url="/api/docs")
     app.state.db = db
@@ -57,6 +80,7 @@ def create_app(
     app.state.importer = importer
     app.state.watcher = watcher
     app.state.monitor = monitor
+    app.state.pipeline = pipeline
     app.include_router(lan_router)
 
     # ---- 状态 ----
@@ -130,13 +154,138 @@ def create_app(
         db.execute("DELETE FROM devices WHERE id=?", (device_id,))
         return {"ok": True}
 
-    # ---- 触发后台清洗流水线（M1 记录事件，M2 起真正执行）----
+    # ================= M2：流水线 / 时间轴 / 说话人校准 / 音乐 =================
+    import re as _re
+    import threading as _threading
+
+    _DAY_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    def _require_pipeline() -> Pipeline:
+        if pipeline is None:
+            raise HTTPException(503, "流水线未启用")
+        return pipeline
+
+    def _valid_day(day: str) -> str:
+        if not _DAY_RE.match(day or ""):
+            raise HTTPException(400, "日期格式应为 YYYY-MM-DD")
+        return day
+
+    @app.post("/api/v1/pipeline/scan")
+    def pipeline_scan() -> dict:
+        days = _require_pipeline().run_auto()
+        return {"ok": True, "queued_days": days}
+
+    @app.get("/api/v1/pipeline/status")
+    def pipeline_status() -> dict:
+        p = _require_pipeline()
+        return {
+            "pending_days": p.pending_days(),
+            "historical_days": p.historical_days(),
+            "current_day": p.current_day,
+            "auto_transcribe_since": cfg.auto_transcribe_since,
+            "provider": p.engines.provider_used,
+        }
+
     @app.post("/api/v1/pipeline/run/{day}")
     def pipeline_run(day: str) -> dict:
-        events.publish("pipeline.day_ready", {"day": day, "file_ids": [
-            r["id"] for r in db.query(
-                "SELECT id FROM ingest_files WHERE recorded_at=?", (day,))]})
-        return {"ok": True, "note": "M1 仅记录触发事件；M2 接入本地音频流水线"}
+        """手动触发某日清洗（历史日期自动保留原 WAV）。"""
+        _valid_day(day)
+        p = _require_pipeline()
+        if p.current_day == day:
+            return {"ok": True, "note": "该日期正在处理中"}
+        _threading.Thread(target=p.process_day, args=(day,),
+                          kwargs={"keep_raw": True}, daemon=True).start()
+        return {"ok": True, "note": "已启动（keep_raw=True，历史归档保留原 WAV）"}
+
+    @app.get("/api/v1/day/{day}/timeline")
+    def day_timeline(day: str) -> dict:
+        _valid_day(day)
+        segments = [dict(r) for r in db.query(
+            "SELECT * FROM audio_segments WHERE day=? ORDER BY start_offset", (day,))]
+        music = [dict(r) for r in db.query(
+            "SELECT * FROM music_tracks WHERE day=? ORDER BY start_ts", (day,))]
+        photos = [dict(r) for r in db.query(
+            "SELECT * FROM photos WHERE captured_at=? ORDER BY captured_ts", (day,))]
+        files = [dict(r) for r in db.query(
+            "SELECT id, status, size_bytes, compressed_path, raw_path, error, deleted_on_device"
+            " FROM ingest_files WHERE recorded_at=?", (day,))]
+        # 说话人视图（当日聚类去重 + 代表切片）
+        speakers: dict[int, dict] = {}
+        for seg in db.query(
+            "SELECT cluster_id, speaker_name, speaker_match_score, segment_path"
+            " FROM audio_segments WHERE day=? AND cluster_id IS NOT NULL", (day,)
+        ):
+            cid = seg["cluster_id"]
+            view = speakers.setdefault(cid, {
+                "cluster_id": cid, "display": seg["speaker_name"],
+                "score": seg["speaker_match_score"], "clips": [], "segments": 0})
+            view["segments"] += 1
+            if seg["segment_path"] and seg["segment_path"] not in view["clips"]:
+                view["clips"].append(seg["segment_path"])
+        return {"day": day, "segments": segments, "music": music,
+                "photos": photos, "files": files,
+                "speakers": sorted(speakers.values(), key=lambda v: v["cluster_id"]),
+                "summary": None}
+
+    @app.post("/api/v1/day/{day}/speakers/{cluster_id}/rename")
+    def speaker_rename(day: str, cluster_id: int, body: RenameBody) -> dict:
+        _valid_day(day)
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "新名字不能为空")
+        learned = _require_pipeline().rename_speaker(day, cluster_id, name)
+        return {"ok": True, "learned_samples": learned}
+
+    @app.post("/api/v1/day/{day}/speakers/merge")
+    def speaker_merge(day: str, body: MergeBody) -> dict:
+        _valid_day(day)
+        moved = _require_pipeline().merge_speakers(day, body.keep_id, body.gone_id, body.name)
+        return {"ok": True, "moved": moved}
+
+    @app.get("/api/v1/audio/segment/{segment_id}")
+    def audio_segment(segment_id: int) -> FileResponse:
+        seg = db.query_one(
+            "SELECT s.*, f.raw_path AS f_raw, f.compressed_path AS f_opus"
+            " FROM audio_segments s JOIN ingest_files f ON f.id = s.file_id"
+            " WHERE s.id=?", (segment_id,))
+        if seg is None:
+            raise HTTPException(404, "片段不存在")
+        src = seg["f_raw"] if seg["f_raw"] else seg["f_opus"]
+        if not src:
+            raise HTTPException(404, "音频源文件不存在（可能已被瘦身，请试听代表切片）")
+        from ..audio.transcode import slice_wav
+
+        import os as _os
+        import tempfile as _tempfile
+
+        tmp = Path(_tempfile.gettempdir()) / f"echocard-seg-{segment_id}-{_os.getpid()}.wav"
+        slice_wav(src, tmp, seg["start_offset"], seg["end_offset"])
+        from starlette.background import BackgroundTask
+
+        return FileResponse(tmp, media_type="audio/wav",
+                            background=BackgroundTask(lambda p=str(tmp): _os.unlink(p)))
+
+    @app.get("/api/v1/music/day/{day}")
+    def music_day(day: str) -> dict:
+        _valid_day(day)
+        return {"music": [dict(r) for r in db.query(
+            "SELECT * FROM music_tracks WHERE day=? ORDER BY start_ts", (day,))]}
+
+    @app.post("/api/v1/music/track/{track_id}/recognize")
+    def music_track_recognize(track_id: int) -> dict:
+        row = db.query_one("SELECT * FROM music_tracks WHERE id=?", (track_id,))
+        if row is None:
+            raise HTTPException(404, "音乐节点不存在")
+        from ..audio.music_id import recognize_time_range
+
+        return recognize_time_range(db, cfg, row["day"], row["start_ts"], row["end_ts"])
+
+    @app.post("/api/v1/music/range")
+    def music_range(body: MusicRangeBody) -> dict:
+        _valid_day(body.day)
+        from ..audio.music_id import recognize_time_range
+
+        return recognize_time_range(db, cfg, body.day, body.start, body.end)
 
     # ---- 最小控制台（M4 替换为完整 UI）----
     webui = Path(__file__).resolve().parent.parent / "webui"

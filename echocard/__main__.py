@@ -42,6 +42,17 @@ def main() -> None:
     events = EventBus()
     importer = DeviceImporter(db, cfg, events)
 
+    from .pipeline import Pipeline
+
+    pipeline = Pipeline(db, cfg, events)
+    # 导入完成 → 分界线内日期自动入队（历史日期不自动转写）
+    events.subscribe(
+        "pipeline.day_ready",
+        lambda d: pipeline.enqueue(d["day"])
+        if d.get("day") and d["day"] >= cfg.auto_transcribe_since else None,
+    )
+    pipeline.start_worker()
+
     monitor: UsbMonitor | None = None
     if not args.no_usb:
         monitor = UsbMonitor(db, cfg, importer, events)
@@ -49,9 +60,15 @@ def main() -> None:
     watcher = PhotoWatcher(db, cfg)
     watcher.start()
 
+    # 启动即扫描补全未处理日期（线程内执行，避免阻塞服务启动）
+    import threading as _threading
+
+    _threading.Thread(target=pipeline.run_auto, daemon=True).start()
+
     from .desktop.server import create_app
 
-    app = create_app(db, cfg, events, importer, watcher=watcher, monitor=monitor)
+    app = create_app(db, cfg, events, importer, watcher=watcher,
+                     monitor=monitor, pipeline=pipeline)
     url = f"http://127.0.0.1:{cfg.server_port}"
     log.info("控制台：%s      手机传图（局域网）：%s/upload", url, url)
 
