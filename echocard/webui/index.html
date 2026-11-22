@@ -2,123 +2,675 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EchoCard 控制台</title>
+<title>EchoCard — 本地记忆工作台</title>
 <style>
-  :root[data-theme="dark"] {
-    --bg:#0f1115; --panel:#171a21; --panel2:#10131a; --line:#262b36;
-    --text:#e6e8ee; --muted:#8b93a5; --accent:#5b7cfa; --ok:#5dd39e; --warn:#d9b44a; --err:#e5645d;
-  }
-  :root[data-theme="light"] {
-    --bg:#f6f7fa; --panel:#ffffff; --panel2:#f1f3f8; --line:#e3e6ee;
-    --text:#1c2230; --muted:#6b7385; --accent:#4061e8; --ok:#1d9e6a; --warn:#a97b14; --err:#cc4a44;
-  }
-  * { box-sizing:border-box; }
-  body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; background:var(--bg);
-         color:var(--text); padding:28px; }
-  .wrap { max-width:980px; margin:0 auto; }
-  header { display:flex; align-items:center; gap:14px; margin-bottom:22px; }
-  h1 { font-size:22px; margin:0; letter-spacing:.5px; }
-  .badge { font-size:12px; color:var(--muted); border:1px solid var(--line);
-           border-radius:999px; padding:3px 10px; }
-  .spacer { flex:1; }
-  button, select { background:var(--panel2); color:var(--text); border:1px solid var(--line);
-                   border-radius:10px; padding:9px 14px; font-size:13px; cursor:pointer; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .banner { border-radius:12px; padding:12px 16px; font-size:13px; margin-bottom:18px;
-            border:1px solid var(--line); background:var(--panel2); color:var(--muted); }
-  .banner.danger { border-color:var(--err); color:var(--err); background:transparent; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px;
-          padding:18px; box-shadow:0 6px 24px rgba(0,0,0,.18); }
-  .card h2 { font-size:14px; margin:0 0 12px; color:var(--muted); font-weight:600;
-             text-transform:uppercase; letter-spacing:1px; }
-  .stat { font-size:26px; font-weight:700; margin:2px 0 6px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line);
-          white-space:nowrap; }
-  th { color:var(--muted); font-weight:500; }
-  #log { font-family:Consolas,monospace; font-size:12px; max-height:320px; overflow:auto; }
-  #log div { padding:3px 4px; border-bottom:1px dashed var(--line); }
-  .ts { color:var(--muted); }
-  .topic { color:var(--accent); }
-  label.switch { display:flex; gap:8px; align-items:center; font-size:13px; margin:6px 0; }
-  a { color:var(--accent); text-decoration:none; }
+:root[data-theme="dark"] {
+  --bg:#0f1115; --panel:#171a21; --panel2:#10131a; --line:#262b36; --line2:#303747;
+  --text:#e6e8ee; --muted:#8b93a5; --accent:#6c8cff; --accent2:#5b7cfa;
+  --ok:#5dd39e; --warn:#d9b44a; --err:#e5645d; --card:0 6px 24px rgba(0,0,0,.25);
+}
+:root[data-theme="light"] {
+  --bg:#f5f6fa; --panel:#ffffff; --panel2:#f0f2f8; --line:#e4e7ef; --line2:#d3d8e6;
+  --text:#1b2130; --muted:#6d7588; --accent:#4061e8; --accent2:#3554d6;
+  --ok:#1d9e6a; --warn:#a97b14; --err:#cc4a44; --card:0 6px 24px rgba(30,40,80,.08);
+}
+*{box-sizing:border-box; margin:0}
+body{background:var(--bg); color:var(--text); font-family:"Segoe UI",system-ui,"Microsoft YaHei",sans-serif;
+  font-size:14px; height:100vh; display:flex; flex-direction:column; overflow:hidden}
+button,select,textarea,input{font-family:inherit; font-size:13px; color:var(--text);
+  background:var(--panel2); border:1px solid var(--line); border-radius:9px; padding:7px 12px}
+button{cursor:pointer; transition:.12s}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent2); border-color:var(--accent2); color:#fff}
+button.small{padding:4px 9px; font-size:12px; border-radius:7px}
+button:disabled{opacity:.45; cursor:not-allowed}
+input:focus,textarea:focus{outline:none; border-color:var(--accent)}
+/* ---------- 顶栏 ---------- */
+header{display:flex; align-items:center; gap:12px; padding:10px 16px;
+  border-bottom:1px solid var(--line); background:var(--panel)}
+.logo{font-weight:700; font-size:16px; letter-spacing:.5px}
+.logo span{color:var(--accent)}
+.badge{font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--line);
+  color:var(--muted); white-space:nowrap}
+.badge.ok{color:var(--ok); border-color:var(--ok)}
+.badge.warn{color:var(--warn); border-color:var(--warn)}
+.badge.err{color:var(--err); border-color:var(--err)}
+.spacer{flex:1}
+/* ---------- 主体布局 ---------- */
+main{flex:1; display:flex; min-height:0}
+aside{width:288px; border-right:1px solid var(--line); background:var(--panel);
+  display:flex; flex-direction:column; overflow-y:auto}
+section.right{flex:1; display:flex; flex-direction:column; min-width:0}
+/* 日历 */
+.cal{padding:12px 14px}
+.cal h3{font-size:12px; color:var(--muted); margin-bottom:8px; font-weight:600}
+.cal-head{display:flex; align-items:center; gap:6px; margin-bottom:6px}
+.cal-head b{font-size:14px}
+.cal-grid{display:grid; grid-template-columns:repeat(7,1fr); gap:3px; text-align:center}
+.cal-grid .dow{font-size:11px; color:var(--muted); padding:2px 0}
+.cal-cell{position:relative; padding:6px 0; border-radius:8px; cursor:pointer; font-size:13px}
+.cal-cell:hover{background:var(--panel2)}
+.cal-cell.today{border:1px solid var(--accent)}
+.cal-cell.sel{background:var(--accent2); color:#fff}
+.cal-cell.dim{color:var(--muted); opacity:.45}
+.dot{position:absolute; left:50%; transform:translateX(-50%); bottom:1px; width:5px; height:5px;
+  border-radius:50%; background:var(--muted)}
+.dot.blue{background:var(--accent)} .dot.green{background:var(--ok)} .dot.gray{background:#8b93a5}
+.multirow{display:flex; gap:8px; margin-top:10px; align-items:center; font-size:12px; color:var(--muted)}
+/* 搜索 */
+.search{padding:10px 14px; border-top:1px solid var(--line)}
+.search input{width:100%}
+#searchResults{margin-top:8px; max-height:200px; overflow:auto; font-size:12px}
+#searchResults .hit{padding:6px 8px; border-radius:8px; background:var(--panel2); margin-bottom:5px; cursor:pointer}
+#searchResults .hit b{color:var(--accent)}
+#searchResults .kind{color:var(--muted); font-size:11px}
+/* 同步记录 */
+.sync{padding:10px 14px; border-top:1px solid var(--line); font-size:12px; color:var(--muted)}
+/* ---------- 右侧 ---------- */
+.daybar{padding:12px 18px; border-bottom:1px solid var(--line); background:var(--panel);
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.daybar h2{font-size:17px}
+.tabs{display:flex; gap:4px; padding:8px 18px 0; background:var(--panel)}
+.tab{padding:8px 16px; border-radius:10px 10px 0 0; cursor:pointer; color:var(--muted); font-size:13px;
+  border:1px solid transparent; border-bottom:none}
+.tab.active{color:var(--text); background:var(--bg); border-color:var(--line); font-weight:600}
+.content{flex:1; overflow-y:auto; padding:16px 18px}
+.card{background:var(--panel); border:1px solid var(--line); border-radius:14px;
+  padding:14px 16px; margin-bottom:14px; box-shadow:var(--card)}
+.card h4{font-size:13px; color:var(--muted); margin-bottom:10px; text-transform:uppercase; letter-spacing:.6px}
+/* 说话人胶囊 */
+.capsules{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px}
+.cap{display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:999px;
+  border:1px solid var(--line2); background:var(--panel2); cursor:pointer}
+.cap .nm{font-weight:600}
+.cap .sc{font-size:11px; color:var(--muted)}
+.cap.suspect{border-color:var(--warn)} .cap.matched{border-color:var(--ok)}
+.cap.mergeA{outline:2px solid var(--accent)} .cap.mergeB{outline:2px dashed var(--warn)}
+.cap.mergeBtn{border-style:dashed; color:var(--accent); background:transparent}
+/* 时间轴行 */
+.seg{display:flex; gap:10px; padding:9px 4px; border-bottom:1px dashed var(--line); align-items:flex-start}
+.seg .t{color:var(--muted); font-family:Consolas,monospace; font-size:12px; white-space:nowrap; padding-top:2px}
+.seg .tx{flex:1; line-height:1.5}
+.seg .tag{display:inline-block; font-size:11px; color:var(--muted); border:1px solid var(--line);
+  border-radius:6px; padding:1px 6px; margin-left:6px}
+.seg .sp{color:var(--accent); font-weight:600}
+.music-card{display:flex; align-items:center; gap:12px; padding:10px 12px; border-radius:12px;
+  background:var(--panel2); border:1px solid var(--line); margin-bottom:8px}
+.music-card .emoji{font-size:20px}
+.photos{display:flex; gap:10px; flex-wrap:wrap}
+.ph{width:120px; border-radius:10px; overflow:hidden; border:1px solid var(--line); background:var(--panel2)}
+.ph img{width:100%; height:86px; object-fit:cover; display:block; cursor:pointer}
+.ph .lbl{font-size:11px; color:var(--muted); padding:4px 8px; display:flex; justify-content:space-between; align-items:center}
+/* 复盘 */
+.summary-body{line-height:1.75; white-space:pre-wrap}
+.fm{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px}
+.chip{font-size:12px; padding:3px 10px; border-radius:999px; background:var(--panel2);
+  border:1px solid var(--line); color:var(--accent)}
+.todo{display:flex; gap:8px; align-items:center; padding:6px 0; border-bottom:1px dashed var(--line)}
+.todo input{width:15px;height:15px; accent-color:var(--accent)}
+.dropzone{border:2px dashed var(--line2); border-radius:14px; padding:34px; text-align:center;
+  color:var(--muted); transition:.15s}
+.dropzone.hot{border-color:var(--accent); color:var(--accent); background:rgba(108,140,255,.06)}
+/* 日志 */
+.logline{font-family:Consolas,monospace; font-size:12px; padding:4px 2px; border-bottom:1px dashed var(--line)}
+.logline .ts{color:var(--muted)} .logline .topic{color:var(--accent)}
+/* 模态 */
+.modal-mask{position:fixed; inset:0; background:rgba(0,0,0,.5); display:none;
+  align-items:center; justify-content:center; z-index:50}
+.modal-mask.show{display:flex}
+.modal{background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px 22px;
+  width:min(560px, 92vw); max-height:86vh; overflow:auto; box-shadow:var(--card)}
+.modal h3{margin-bottom:14px; font-size:16px}
+.modal .row{display:flex; gap:10px; align-items:center; margin-bottom:12px}
+.modal .row label{width:120px; color:var(--muted); font-size:13px; flex-shrink:0}
+.modal .row input,.modal .row textarea,.modal .row select{flex:1}
+.modal textarea{min-height:150px; resize:vertical}
+.hint{font-size:12px; color:var(--muted); margin-top:-6px; margin-bottom:12px}
+#toastBox{position:fixed; right:18px; bottom:18px; z-index:99; display:flex; flex-direction:column; gap:8px}
+.toast{background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--accent);
+  border-radius:10px; padding:10px 14px; font-size:13px; box-shadow:var(--card); animation:tin .2s}
+.toast.err{border-left-color:var(--err)} .toast.ok{border-left-color:var(--ok)}
+@keyframes tin{from{transform:translateY(8px); opacity:0}}
+.empty{text-align:center; color:var(--muted); padding:40px 0}
+audio{width:220px; height:32px}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1>EchoCard</h1><span class="badge" id="ver">v?</span>
-    <span class="spacer"></span>
-    <a href="/upload" target="_blank"><button>📱 扫码传图页</button></a>
-    <button id="scan">🔍 立即扫描 USB</button>
-    <button id="toggleTheme">🌗 主题</button>
-  </header>
+<header>
+  <div class="logo">Echo<span>Card</span></div>
+  <span class="badge" id="devBadge">设备：检测中…</span>
+  <span class="badge" id="pipeBadge">流水线：空闲</span>
+  <span class="badge" id="switchBadge" title="设备清空开关">清空开关：关</span>
+  <div class="spacer"></div>
+  <button class="small" onclick="openMusicDialog()">🎵 按时段查歌</button>
+  <button class="small" onclick="showQr()">📱 扫码传图</button>
+  <button class="small" onclick="openSettings()">⚙️ 设置</button>
+  <button class="small" onclick="toggleTheme()">🌗</button>
+</header>
 
-  <div class="banner" id="deleteBanner">设备清空开关：关闭（导入后源文件全部保留）</div>
-
-  <div class="grid">
-    <div class="card"><h2>已导入音频</h2><div class="stat" id="cAudio">–</div>
-      <div class="muted">个 WAV 文件（SHA-256 去重）</div></div>
-    <div class="card"><h2>已归档照片</h2><div class="stat" id="cPhotos">–</div>
-      <div class="muted">张（含压缩图）</div></div>
-    <div class="card"><h2>记忆天数</h2><div class="stat" id="cDays">–</div>
-      <div class="muted">天（按录音归属日期）</div></div>
-    <div class="card"><h2>数据目录</h2><div class="stat" id="dataRoot" style="font-size:15px">–</div>
-      <div class="muted">录音 / 照片 / 数据库 / 导出包均在此</div></div>
-  </div>
-
-  <div class="card" style="margin-top:16px">
-    <h2>绑定设备</h2>
-    <table id="devices"><thead><tr>
-      <th>ID</th><th>类型</th><th>序列号</th><th>VID</th><th>卷标</th><th>最近在线</th><th></th>
-    </tr></thead><tbody></tbody></table>
-    <div style="margin-top:10px;color:var(--muted);font-size:12px">
-      绑定向导：插入设备 → 「立即扫描 USB」→ 对未绑定设备调用 <code>POST /api/v1/usb/{盘符}/bind</code>
-      （M4 将提供图形向导）
+<main>
+  <aside>
+    <div class="cal">
+      <h3>月历 <span style="font-weight:400">· 点击日期查看</span></h3>
+      <div class="cal-head">
+        <button class="small" onclick="calMove(-1)">‹</button>
+        <b id="calTitle"></b>
+        <button class="small" onclick="calMove(1)">›</button>
+        <div class="spacer"></div>
+        <label style="display:flex;gap:4px;align-items:center;font-size:12px">
+          <input type="checkbox" id="multiMode" style="width:13px;height:13px"> 多选
+        </label>
+      </div>
+      <div class="cal-grid" id="calGrid"></div>
+      <div class="multirow">
+        <span id="selInfo">未选择日期</span>
+        <div class="spacer"></div>
+        <button class="small primary" id="btnExport" onclick="doExport()">📦 合并导出</button>
+      </div>
     </div>
-  </div>
+    <div class="search">
+      <h3 style="font-size:12px;color:var(--muted);margin-bottom:8px">全局记忆搜索</h3>
+      <input id="searchBox" placeholder="搜总结 / 转写 / 歌曲 / 待办…">
+      <div id="searchResults"></div>
+    </div>
+    <div class="sync" id="syncInfo">最近同步：—</div>
+  </aside>
 
-  <div class="card" style="margin-top:16px">
-    <h2>后台事件日志</h2>
-    <div id="log"></div>
-  </div>
-</div>
+  <section class="right">
+    <div class="daybar">
+      <h2 id="dayTitle">选择一个日期</h2>
+      <span class="badge" id="dayState"></span>
+      <div class="spacer"></div>
+      <button class="small primary" onclick="doExport(true)">📦 导出投喂包</button>
+      <button class="small" onclick="copyMd()">📋 复制全文</button>
+      <button class="small" onclick="reflowPaste()">📥 导入AI总结</button>
+      <button class="small" id="btnApi" style="display:none" onclick="apiSummary()">⚡ API总结</button>
+      <button class="small" id="btnManualTrans" style="display:none" onclick="manualTranscribe()">✍️ 手动转写</button>
+    </div>
+    <div class="tabs">
+      <div class="tab active" data-tab="review" onclick="switchTab('review')">AI 复盘记忆</div>
+      <div class="tab" data-tab="timeline" onclick="switchTab('timeline')">清洗时间轴 & 说话人校准</div>
+      <div class="tab" data-tab="log" onclick="switchTab('log')">后台流水线日志</div>
+    </div>
+    <div class="content" id="content"></div>
+  </section>
+</main>
+
+<!-- 模态层 -->
+<div class="modal-mask" id="mask"><div class="modal" id="modal"></div></div>
+<div id="toastBox"></div>
+<audio id="player" style="display:none"></audio>
+
 <script>
-const $=id=>document.getElementById(id);
-async function refresh(){
-  try{
-    const s=await (await fetch('/api/v1/status')).json();
-    $('ver').textContent='v'+s.version; $('dataRoot').textContent=s.data_root;
-    $('cAudio').textContent=s.counts.audio_files; $('cPhotos').textContent=s.counts.photos;
-    $('cDays').textContent=s.counts.days;
-    const b=$('deleteBanner');
-    if(s.delete_after_verify){b.className='banner danger';
-      b.textContent='⚠ 设备清空开关：开启（校验+落库成功后自动删除设备源文件）';}
-    else{b.className='banner';b.textContent='设备清空开关：关闭（导入后源文件全部保留）';}
-    const tb=$('devices').querySelector('tbody');tb.innerHTML='';
-    for(const d of s.devices){
-      const tr=document.createElement('tr');
-      tr.innerHTML=`<td>${d.id}</td><td>${d.kind}</td><td>${d.serial||'-'}</td>
-        <td>${d.vid||'-'}</td><td>${d.volume_label||'-'}</td><td>${d.last_seen||'-'}</td>
-        <td><a href="#" onclick="unbind(${d.id});return false;">解绑</a></td>`;
-      tb.appendChild(tr);
-    }
-    const lg=await (await fetch('/api/v1/ingest/log?limit=60')).json();
-    $('log').innerHTML=lg.log.map(e=>
-      `<div><span class="ts">${e.ts}</span> <span class="topic">${e.topic}</span> `+
-      JSON.stringify(e.data).slice(0,180)+`</div>`).join('')||'<div>暂无事件</div>';
-  }catch(e){$('log').innerHTML='<div>服务连接失败</div>';}
+/* ================= 工具 ================= */
+const $ = id => document.getElementById(id);
+const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { const t = await r.text().catch(()=>r.statusText); throw new Error(`${r.status}: ${t.slice(0,200)}`); }
+  return r.json();
 }
-async function unbind(id){ if(confirm('解绑设备 #'+id+'？（设备上的 .echocard_source 标记保留）'))
-  await fetch('/api/v1/devices/'+id,{method:'DELETE'}); refresh(); }
-$('scan').onclick=async()=>{ await fetch('/api/v1/usb/scan'); refresh(); };
-$('toggleTheme').onclick=()=>{
-  const r=document.documentElement;
-  r.dataset.theme = r.dataset.theme==='dark'?'light':'dark';
-  fetch('/api/v1/config',{method:'PATCH',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({theme:r.dataset.theme})});
-};
-refresh(); setInterval(refresh,3000);
+function toast(msg, cls='') {
+  const d = document.createElement('div'); d.className = 'toast '+cls; d.textContent = msg;
+  $('toastBox').appendChild(d); setTimeout(()=>d.remove(), 3500);
+}
+function modal(html){ $('modal').innerHTML = html; $('mask').classList.add('show'); }
+function closeModal(){ $('mask').classList.remove('show'); }
+$('mask').addEventListener('click', e => { if (e.target === $('mask')) closeModal(); });
+function toggleTheme(){
+  const r = document.documentElement;
+  r.dataset.theme = r.dataset.theme === 'dark' ? 'light' : 'dark';
+  api('/api/v1/config', {method:'PATCH', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({theme: r.dataset.theme})}).catch(()=>{});
+}
+
+/* ================= 状态与顶栏 ================= */
+let STATUS = null, CFG = null;
+async function refreshStatus(){
+  try {
+    STATUS = await api('/api/v1/status');
+    const dev = STATUS.devices.find(d => d.kind === 'dji_mic_tx');
+    const b = $('devBadge');
+    if (dev) { b.textContent = `🎙 DJI Mic（…${(dev.serial||'').slice(-4)}）在线`; b.className = 'badge ok'; }
+    else { b.textContent = '🎙 录音设备：待插入'; b.className = 'badge'; }
+    $('switchBadge').textContent = STATUS.delete_after_verify ? '清空开关：开 ⚠️' : '清空开关：关';
+    $('switchBadge').className = 'badge ' + (STATUS.delete_after_verify ? 'err' : '');
+    $('switchBadge').onclick = () => toast('清空开关默认关闭；验收确认后请在设置页自行开启', 'err');
+  } catch(e) { $('devBadge').textContent = '服务连接失败'; $('devBadge').className = 'badge err'; }
+}
+async function refreshPipeline(){
+  try {
+    const p = await api('/api/v1/pipeline/status');
+    const b = $('pipeBadge');
+    if (p.current_day) { b.textContent = `流水线：处理 ${p.current_day}`; b.className = 'badge warn'; }
+    else if (p.pending_days.length) { b.textContent = `流水线：${p.pending_days.length} 天待处理`; b.className = 'badge warn'; }
+    else { b.textContent = '流水线：空闲'; b.className = 'badge'; }
+  } catch(e) {}
+}
+
+/* ================= 月历 ================= */
+let calY, calM, daysMap = {}, selected = new Set(), curDay = null;
+function calMove(d){ calM += d; if (calM < 0) { calM = 11; calY--; } if (calM > 11) { calM = 0; calY++; } renderCal(); }
+async function refreshDays(){
+  try {
+    const d = await api('/api/v1/days');
+    daysMap = {}; d.days.forEach(x => daysMap[x.day] = x);
+    renderCal(); renderSync();
+  } catch(e) {}
+}
+function renderCal(){
+  $('calTitle').textContent = `${calY} 年 ${calM+1} 月`;
+  const grid = $('calGrid'); grid.innerHTML = '';
+  ['一','二','三','四','五','六','日'].forEach(w => {
+    const e = document.createElement('div'); e.className = 'dow'; e.textContent = w; grid.appendChild(e); });
+  const first = new Date(calY, calM, 1);
+  const offset = (first.getDay() + 6) % 7;
+  const dim = new Date(calY, calM + 1, 0).getDate();
+  const today = new Date();
+  for (let i = 0; i < offset; i++) grid.appendChild(document.createElement('div'));
+  for (let d = 1; d <= dim; d++) {
+    const ds = `${calY}-${String(calM+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const cell = document.createElement('div');
+    cell.className = 'cal-cell'; cell.textContent = d;
+    const info = daysMap[ds];
+    if (info) { const dot = document.createElement('i'); dot.className = 'dot ' + info.state; cell.appendChild(dot); cell.title =
+      `${ds} · ${info.files} 音频 / ${info.segments} 段 / ${info.photos} 照片` + (info.historical ? '（历史归档）' : ''); }
+    const now = new Date();
+    if (ds === `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`) cell.classList.add('today');
+    if (selected.has(ds)) cell.classList.add('sel');
+    cell.onclick = () => pickDay(ds);
+    grid.appendChild(cell);
+  }
+  const n = selected.size;
+  $('selInfo').textContent = $('multiMode').checked
+    ? (n ? `已选 ${n} 天` : '多选模式：点击日期') : (curDay || '未选择日期');
+}
+function pickDay(ds){
+  if ($('multiMode').checked) { selected.has(ds) ? selected.delete(ds) : selected.add(ds); renderCal(); return; }
+  selected = new Set([ds]); curDay = ds; renderCal(); loadDay(ds);
+}
+function renderSync(){
+  const days = Object.keys(daysMap).sort().reverse();
+  if (!days.length) { $('syncInfo').textContent = '最近同步：暂无'; return; }
+  const info = daysMap[days[0]];
+  $('syncInfo').innerHTML = `最近同步：<b style="color:var(--text)">${days[0]}</b><br>` +
+    `${info.files} 个音频 · ${info.segments} 段转写 · ${info.photos} 张照片` +
+    (info.historical ? '<br>（早于分界线：仅归档不自动转写）' : '');
+}
+$('multiMode').addEventListener('change', () => { if (!$('multiMode').checked && curDay) { selected = new Set([curDay]); } renderCal(); });
+
+/* ================= 日视图 ================= */
+let TL = null, activeTab = 'review';
+function switchTab(t){
+  activeTab = t;
+  document.querySelectorAll('.tab').forEach(e => e.classList.toggle('active', e.dataset.tab === t));
+  if (curDay) loadDay(curDay); else $('content').innerHTML = '<div class="empty">← 从左侧月历选择一个日期开始</div>';
+}
+async function loadDay(day){
+  $('dayTitle').textContent = day;
+  const info = daysMap[day];
+  const st = $('dayState');
+  if (info) {
+    st.textContent = info.historical ? '历史归档（保留原 WAV）' :
+      info.state === 'green' ? '已回流归档 ✅' : info.state === 'blue' ? '已清洗待投喂' : '待处理/处理中';
+    st.className = 'badge ' + (info.state === 'green' ? 'ok' : info.state === 'gray' ? 'warn' : '');
+    $('btnManualTrans').style.display = info.historical ? '' : 'none';
+  }
+  try { TL = await api(`/api/v1/day/${day}/timeline`); } catch(e) { TL = null; }
+  let summary = null;
+  try {
+    const list = (await api('/api/v1/summaries')).summaries.filter(s => s.day_range === day);
+    if (list.length) summary = await api(`/api/v1/summary/${list[0].id}`);
+  } catch(e) {}
+  const html = { review: renderReview, timeline: renderTimeline, log: renderLog }[activeTab];
+  $('content').innerHTML = html(summary);
+  bindDayEvents(day);
+}
+function renderReview(summary){
+  if (!summary) {
+    return `<div class="dropzone" id="drop">📥 将 AI 生成的 <b>summary.zip / .md</b> 拖到此处<br>
+      或粘贴回复文本<br><br>
+      <button class="primary" onclick="reflowPaste()">📋 粘贴 AI 回复</button>
+      <button onclick="doExport(true)">先导出投喂包 →</button>
+      <p class="hint" style="margin-top:12px">导出投喂包 → 发给任意大模型 → 把回复回流到此处即完成归档闭环</p></div>`;
+  }
+  const todos = summary.todos.map(t =>
+    `<div class="todo"><input type="checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo(${t.id}, this.checked)">
+     <span style="${t.done ? 'text-decoration:line-through;color:var(--muted)' : ''}">${esc(t.content)}</span></div>`).join('');
+  const tags = JSON.parse(summary.tags || '[]').map(t => `<span class="chip">#${esc(t)}</span>`).join('');
+  const music = JSON.parse(summary.music || '[]').map(m => `<span class="chip">🎵 ${esc(m)}</span>`).join('');
+  const facts = JSON.parse(summary.facts || '[]').map(f => `<li>${esc(f)}</li>`).join('');
+  return `
+   <div class="card"><h4>结构化元数据</h4>
+     <div class="fm">${tags || '<span class="chip">无标签</span>'}</div>
+     ${music ? `<div class="fm">${music}</div>` : ''}
+     ${facts ? `<ul style="margin:0 0 4px 18px; font-size:13px">${facts}</ul>` : ''}
+   </div>
+   <div class="card"><h4>复盘正文（AI 生成 · 来源 ${esc(summary.source)}）</h4>
+     <div class="summary-body">${esc(summary.content_md)}</div></div>
+   <div class="card"><h4>待办（可勾选完成）</h4>${todos || '<div class="hint">本日无待办</div>'}</div>`;
+}
+function renderTimeline(){
+  if (!TL) return '<div class="empty">该日期暂无清洗数据</div>';
+  const sp = TL.speakers || [];
+  const capHtml = sp.map((v,i) => `
+    <div class="cap ${v.display && v.display.startsWith('疑似') ? 'suspect' : (v.display && !v.display.startsWith('说话人') ? 'matched' : '')}"
+         data-cid="${v.cluster_id}" onclick="capClick(${v.cluster_id}, this)">
+      <span class="nm">${esc(v.display || `说话人 ${v.cluster_id}`)}</span>
+      <span class="sc">${v.score ? (v.score*100).toFixed(0) + '%' : ''}</span>
+      ${v.clips && v.clips.length ? `<button class="small" onclick="event.stopPropagation(); playClips(${v.cluster_id})">▶ 试听</button>` : ''}
+      <button class="small" onclick="event.stopPropagation(); renameSpeaker(${v.cluster_id}, '${esc(v.display || '')}')">✏️</button>
+    </div>`).join('');
+  const mergeMode = window._mergePick && window._mergePick.length;
+  const segs = TL.segments.map(s => `
+    <div class="seg">
+      <span class="t">${esc(s.start_ts)}–${esc(s.end_ts)}</span>
+      <div class="tx"><span class="sp">${esc(s.speaker_name || '说话人 ' + s.cluster_id)}</span> ${esc(s.text || '（无文本，纯音频段）')}
+        ${(JSON.parse(s.audio_tags||'[]')||[]).map(t => `<span class="tag">${esc(t)}</span>`).join('')}
+        ${s.starred ? '<span class="tag" style="color:var(--warn)">⭐</span>' : ''}
+      </div>
+      <div style="display:flex; gap:6px; align-items:center">
+        <button class="small" onclick="playSeg(${s.id}, this)">▶</button>
+        <button class="small" onclick="starSeg(${s.id}, ${s.starred ? 0 : 1})">${s.starred ? '⭐' : '☆'}</button>
+      </div>
+    </div>`).join('') || '<div class="empty">本日无语音段落</div>';
+  const mus = TL.music.map(m => `
+    <div class="music-card"><span class="emoji">🎵</span>
+      <div style="flex:1"><b>${esc(m.start_ts)} – ${esc(m.end_ts)}</b>
+        ${m.status === 'recognized' && m.title ? `<br>《${esc(m.title)}》 - ${esc(m.artist || '未知歌手')}` : '<br><span style="color:var(--muted)">未识别</span>'}
+      </div>
+      <button class="small" onclick="recognizeTrack(${m.id}, this)">🔍 听歌识曲</button>
+    </div>`).join('');
+  const ph = TL.photos.map(p => `
+    <div class="ph"><img src="/static-photo?src=${encodeURIComponent(p.compressed_path)}" onclick="window.open('/static-photo?src=${encodeURIComponent(p.compressed_path)}')">
+      <div class="lbl"><span>${esc((p.captured_ts||'').slice(11,16))}</span>
+      <input type="checkbox" ${p.include_in_export ? 'checked' : ''} onchange="photoInclude(${p.id}, this.checked)" title="纳入导出"></div>
+    </div>`).join('') || '<div class="hint">本日无照片</div>';
+  return `
+    <div class="card"><h4>当日说话人胶囊（▶ 试听 · ✏️ 改名即学声纹）</h4>
+      <div class="capsules">${capHtml}
+        ${sp.length >= 2 ? `<div class="cap mergeBtn" onclick="toggleMerge()">${window._merging ? '🚫 取消合并' : '🔗 合并两个聚类'}</div>
+        ${window._merging ? `<button class="small primary" onclick="doMerge()">确认合并（已选 ${window._mergePick.length}/2）</button>` : ''}` : ''}
+      </div>
+      <div class="hint">点击胶囊选中 → 改名会自动学习声纹库（越用越准）；合并用于修复被拆散的同一个人</div>
+    </div>
+    <div class="card"><h4>按时段查歌</h4>
+      <div class="row" style="display:flex; gap:8px; align-items:center">
+        <input type="time" id="qStart" value="15:15"> <span style="color:var(--muted)">至</span>
+        <input type="time" id="qEnd" value="15:30">
+        <button class="small primary" onclick="queryMusic()">🔍 查这半小时的乐曲</button>
+        <span id="qMusicHint" style="font-size:12px;color:var(--muted)"></span>
+      </div></div>
+    <div class="card"><h4>音乐节点</h4>${mus || '<div class="hint">未检测到音乐片段</div>'}</div>
+    <div class="card"><h4>语音时间轴（反偏见保留 · 可试听 / 星标永久留存）</h4>${segs}</div>
+    <div class="card"><h4>照片（勾选纳入导出）</h4><div class="photos">${ph}</div></div>
+    <div class="card"><h4>文件与瘦身</h4>${TL.files.map(f =>
+      `<div class="seg"><span class="t">${f.status}</span><div class="tx">${esc((f.raw_path||f.compressed_path||'').split('\\\\').pop())}
+       ${f.compressed_path ? '' : '<span class="tag">已瘦身/未压缩</span>'}${f.error ? `<span class="tag" style="color:var(--err)">${esc(f.error)}</span>` : ''}</div></div>`).join('')}</div>`;
+}
+function renderLog(){
+  return `<div class="card"><h4>流水线</h4><div id="pipeBox">加载中…</div></div>
+   <div class="card"><h4>事件日志（实时轮询）</h4><div id="logBox">加载中…</div></div>`;
+}
+async function bindDayEvents(day){
+  if (activeTab === 'log') {
+    try {
+      const p = await api('/api/v1/pipeline/status');
+      const box = $('pipeBox');
+      if (box) box.innerHTML = `当前：<b>${esc(p.current_day || '空闲')}</b> · 待处理：${p.pending_days.length} 天
+        （${esc(p.pending_days.join(', ') || '无')}）· 引擎：${esc(p.provider || '未加载')}<br>
+        <button class="small" onclick="api('/api/v1/pipeline/scan',{method:'POST'}).then(()=>toast('已触发扫描','ok')).catch(e=>toast(e,'err'))">立即扫描补全</button>
+        ${p.historical_days.map(d => ` <button class="small" onclick="manualTranscribe('${d}')">✍️ ${d}</button>`).join('')}`;
+    } catch(e) {}
+    const lb = $('logBox');
+    if (lb) {
+      const lg = await api('/api/v1/ingest/log?limit=60').catch(()=>({log:[]}));
+      lb.innerHTML = lg.log.map(e =>
+        `<div class="logline"><span class="ts">${e.ts}</span> <span class="topic">${esc(e.topic)}</span> ${esc(JSON.stringify(e.data).slice(0,150))}</div>`).join('')
+        || '<div class="hint">暂无事件</div>';
+    }
+  }
+}
+
+/* ================= 说话人 / 试听 / 星标 / 查歌 ================= */
+function capClick(cid, el){
+  if (window._merging) {
+    window._mergePick = window._mergePick || [];
+    if (window._mergePick.includes(cid)) { window._mergePick = window._mergePick.filter(x => x !== cid); el.classList.remove('mergeA','mergeB'); }
+    else if (window._mergePick.length < 2) { window._mergePick.push(cid); el.classList.add(window._mergePick.length === 1 ? 'mergeA' : 'mergeB'); }
+    if (curDay) loadDay(curDay); window._merging = true;
+  }
+}
+function toggleMerge(){ window._merging = !window._merging; window._mergePick = []; loadDay(curDay); }
+async function doMerge(){
+  if (!window._mergePick || window._mergePick.length !== 2) { toast('请先选中两个聚类胶囊', 'err'); return; }
+  const name = prompt('合并后命名为（留空保持 说话人 N）：');
+  try {
+    await api(`/api/v1/day/${curDay}/speakers/merge`, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({keep_id: window._mergePick[0], gone_id: window._mergePick[1], name: name || null})});
+    toast('聚类已合并，声纹库已更新 ✅', 'ok');
+  } catch(e) { toast(String(e), 'err'); }
+  window._merging = false; window._mergePick = []; loadDay(curDay);
+}
+async function renameSpeaker(cid, current){
+  const name = prompt(`将「${current}」改名为（改名即学声纹）：`, current && !current.startsWith('说话人') && !current.startsWith('疑似') ? current : '');
+  if (!name) return;
+  try {
+    const r = await api(`/api/v1/day/${curDay}/speakers/${cid}/rename`, {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
+    toast(`已改名并学习 ${r.learned_samples} 条声纹样本 ✅`, 'ok');
+  } catch(e) { toast(String(e), 'err'); }
+  loadDay(curDay);
+}
+function playSeg(id){ const p = $('player'); p.src = `/api/v1/audio/segment/${id}`; p.play(); }
+function playClips(cid){
+  const sp = (TL.speakers || []).find(s => s.cluster_id === cid);
+  if (!sp || !sp.clips || !sp.clips.length) return;
+  const p = $('player'); let i = 0;
+  const names = sp.clips.map(x => x.split(/[\\/]/).pop());
+  const playNext = () => {
+    if (i >= names.length) return;
+    p.src = `/api/v1/audio/clip?day=${curDay}&name=${encodeURIComponent(names[i])}`;
+    p.play(); i++; p.onended = playNext;
+  };
+  playNext();
+}
+async function starSeg(id, v){
+  await api(`/api/v1/segments/${id}/star`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({starred: !!v})});
+  toast(v ? '已 ⭐ 星标（归档清理时永久保留）' : '已取消星标', 'ok'); loadDay(curDay);
+}
+async function photoInclude(id, v){
+  await api(`/api/v1/photos/${id}/include`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({starred: v})});
+}
+async function recognizeTrack(id, btn){
+  btn.disabled = true; btn.textContent = '⏳ 识曲中…';
+  try { const r = await api(`/api/v1/music/track/${id}/recognize`, {method:'POST'});
+    toast(r.ok ? `🎵 ${r.title} - ${r.artist || ''}` : '未识别（已记录，可重试）', r.ok ? 'ok' : 'err');
+  } catch(e) { toast(String(e), 'err'); }
+  loadDay(curDay);
+}
+async function queryMusic(){
+  const s = $('qStart').value, e = $('qEnd').value;
+  if (!s || !e) { toast('请选择时间段', 'err'); return; }
+  $('qMusicHint').textContent = '识曲中…（走代理，最长约 1 分钟）';
+  try { const r = await api('/api/v1/music/range', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({day: curDay, start: s, end: e})});
+    $('qMusicHint').textContent = r.ok ? `🎵 ${r.title} - ${r.artist || ''}` : (r.reason || '未识别');
+    if (r.ok) toast(`🎵 ${r.title} - ${r.artist || ''}`, 'ok');
+  } catch(err) { $('qMusicHint').textContent = String(err); }
+}
+
+/* ================= 导出 / 复制 / 回流 ================= */
+function currentDays(){ return [...selected].sort().length ? [...selected].sort() : (curDay ? [curDay] : []); }
+async function doExport(){
+  const days = currentDays();
+  if (!days.length) { toast('请先在左侧选择日期', 'err'); return; }
+  try {
+    const r = await api('/api/v1/export', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({days})});
+    modal(`<h3>✅ 导出完成（${days.length === 1 ? days[0] : days[0] + ' 至 ' + days[days.length-1]}）</h3>
+      <p class="hint">已生成 zip 与解压文件夹各一份（含 投喂AI.md + photos/）</p>
+      <p style="font-size:13px; line-height:1.8">${esc(r.folder)}<br>${esc(r.zip)}<br>照片 ${r.photos} 张</p>
+      <div class="row" style="margin-top:14px">
+        <button class="primary" onclick="openFolder('${esc(r.zip)}')">📂 打开导出文件夹</button>
+        <button onclick="copyMd(${JSON.stringify(days).replace(/"/g,'&quot;')})">📋 复制投喂全文</button>
+        <div class="spacer"></div><button onclick="closeModal()">关闭</button></div>`);
+  } catch(e) { toast(String(e), 'err'); }
+}
+async function openFolder(zip){
+  try { await api('/api/v1/export/open', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path: zip})}); }
+  catch(e) { toast(String(e), 'err'); }
+}
+async function copyMd(days){
+  const d = days || currentDays(); if (!d.length) { toast('请先选择日期','err'); return; }
+  try {
+    const r = await api(`/api/v1/export/preview?days=${d.join(',')}`);
+    await navigator.clipboard.writeText(r.markdown);
+    toast('投喂全文已复制到剪贴板 ✅ 直接粘贴给大模型', 'ok');
+  } catch(e) { toast(String(e), 'err'); }
+}
+async function reflowPaste(){
+  const days = currentDays(); if (!days.length) { toast('请先选择日期','err'); return; }
+  try { const text = await navigator.clipboard.readText();
+    if (!text.trim()) { toast('剪贴板为空：请先复制 AI 回复', 'err'); return; }
+    const r = await api('/api/v1/reflow/text', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text, day: days[0]})});
+    toast(`AI 总结已回流 ${r.day}（待办 ${r.todos} 条）✅`, 'ok');
+  } catch(e) { toast(String(e), 'err'); }
+  loadDay(days[0]);
+}
+async function toggleTodo(id, done){
+  await api(`/api/v1/todos/${id}/toggle`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({done})});
+  toast(done ? '待办已完成 ✅' : '已恢复未完成');
+}
+async function apiSummary(){
+  if (!confirm('调用 API 对当日内容一键总结并自动回流？')) return;
+  toast('API 总结中（含照片多模态，可能需要 1-3 分钟）…');
+  try { const r = await api(`/api/v1/llm/summary/${curDay}`, {method:'POST'});
+    toast(`完成：${r.reply_chars} 字，已入库 ✅`, 'ok');
+  } catch(e) { toast(String(e), 'err'); }
+  loadDay(curDay);
+}
+async function manualTranscribe(day){
+  const d = day || curDay; if (!d) return;
+  try { const r = await api(`/api/v1/pipeline/run/${d}`, {method:'POST'});
+    toast(r.note || '已启动手动转写（历史日保留原 WAV）', 'ok');
+  } catch(e) { toast(String(e), 'err'); }
+  setTimeout(refreshDays, 1500);
+}
+
+/* ================= 查歌弹窗 / 传图二维码 ================= */
+function openMusicDialog(){
+  if (!curDay) { toast('请先选择日期', 'err'); return; }
+  switchTab('timeline'); curDay && loadDay(curDay).then(() => $('qStart')?.focus());
+  toast('在时间轴页使用「按时段查歌」', 'ok');
+}
+function showQr(){
+  modal(`<h3>📱 手机扫码传图</h3>
+    <div style="text-align:center"><img src="/api/v1/lan/qr" style="width:240px; border-radius:12px"></div>
+    <p class="hint" style="text-align:center; margin-top:10px">手机连同一 WiFi 扫码 → 批量选照片 → 按拍摄时间自动归档</p>
+    <p class="hint" style="text-align:center">POST /api/v1/ingest/photo 亦对 ESP32-S3 等硬件开放</p>
+    <div style="text-align:center"><button onclick="closeModal()">关闭</button></div>`);
+}
+
+/* ================= 搜索 ================= */
+let searchTimer;
+$('searchBox').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => {
+    const q = $('searchBox').value.trim();
+    const box = $('searchResults');
+    if (!q) { box.innerHTML = ''; return; }
+    try {
+      const r = await api(`/api/v1/search?q=${encodeURIComponent(q)}`);
+      box.innerHTML = r.results.map(h =>
+        `<div class="hit" onclick="jumpDay('${h.day_range}')"><span class="kind">[${ {summary:'总结',segment:'转写',music:'歌曲',todo:'待办'}[h.kind] || h.kind } · ${h.day_range}]</span><br>${h.snippet}</div>`).join('')
+        || '<div class="hint">无结果</div>';
+    } catch(e) { box.innerHTML = ''; }
+  }, 300);
+});
+function jumpDay(day){ pickDay(day); window.scrollTo(0,0); switchTab(day && daysMap[day] && daysMap[day].segments ? 'timeline' : 'review'); }
+
+/* ================= 设置 ================= */
+async function openSettings(){
+  CFG = await api('/api/v1/config');
+  const auto = await api('/api/v1/autostart').catch(()=>({enabled:false}));
+  const llm = await api('/api/v1/llm/status').catch(()=>({available:false}));
+  modal(`<h3>⚙️ 设置</h3>
+  <div class="row"><label>数据根目录</label><input id="sRoot" value="${esc(CFG.data_root)}"></div>
+  <p class="hint">录音 / 照片 / 数据库 / 模型 / 导出包 全部收敛于此</p>
+  <div class="row"><label>历史转写分界线</label><input id="sSince" value="${esc(CFG.auto_transcribe_since)}"></div>
+  <p class="hint">早于该日期的录音只归档保留原 WAV（界面可手动转写）；之后自动转写+压缩</p>
+  <div class="row"><label>照片监控目录</label><input id="sWatch" value="${esc((CFG.watched_photo_dirs||[]).join(','))}"></div>
+  <p class="hint">多个用英文逗号分隔（如 Syncthing 同步的相册目录），留空关闭</p>
+  <div class="row"><label>网络代理</label><input id="sProxy" value="${esc(CFG.proxy_url)}"></div>
+  <p class="hint">识曲与 API 总结使用；仅保存在本机配置，绝不进入仓库</p>
+  <div class="row"><label>设备清空开关</label>
+    <input type="checkbox" id="sDel" ${CFG.delete_after_verify ? 'checked' : ''} style="width:15px;height:15px">
+    <span class="hint" style="margin:0">⚠️ 开启后：校验+落库成功即自动删除设备上的单个源文件</span></div>
+  <div class="row"><label>总结后自动清理</label>
+    <input type="checkbox" id="sClean" ${CFG.cleanup_after_summary ? 'checked' : ''} style="width:15px;height:15px">
+    <span class="hint" style="margin:0">AI 总结回流的日期自动清理未⭐星标的压缩音频</span></div>
+  <div class="row"><label>开机自启</label>
+    <input type="checkbox" id="sAuto" ${auto.enabled ? 'checked' : ''} style="width:15px;height:15px"></div>
+  <h3 style="margin-top:18px">⚡ API 一键总结（可选，${llm.available ? '已配置' : '未配置·隐藏'}）</h3>
+  <div class="row"><label>Base URL</label><input id="sApiBase" value="${esc(CFG.api_base_url)}"></div>
+  <div class="row"><label>API Key</label><input id="sApiKey" type="password" placeholder="${CFG.api_key ? '••• 已配置，留空保持不变' : 'sk-…'}"></div>
+  <div class="row"><label>模型</label><input id="sApiModel" value="${esc(CFG.api_model)}"></div>
+  <h3 style="margin-top:18px">📝 投喂 Prompt 模板</h3>
+  <p class="hint">留空使用内置默认模板（含反偏见声明 / 照片推理 / 回流协议）</p>
+  <textarea id="sPrompt" placeholder="（默认模板）{days} {date_value} {zip_name} 占位符可用">${esc(CFG.export_prompt || '')}</textarea>
+  <div class="row" style="margin-top:16px">
+    <button class="primary" onclick="saveSettings()">保存设置</button>
+    <button onclick="closeModal()">取消</button></div>`);
+}
+async function saveSettings(){
+  const patch = {};
+  const v = id => $(id) ? $(id).value.trim() : null;
+  if (v('sRoot')) patch.data_root = v('sRoot');
+  if (v('sSince')) patch.auto_transcribe_since = v('sSince');
+  patch.watched_photo_dirs = v('sWatch') ? v('sWatch').split(',').map(x=>x.trim()).filter(Boolean) : [];
+  if (v('sProxy') !== null) patch.proxy_url = v('sProxy');
+  patch.delete_after_verify = $('sDel').checked;
+  patch.cleanup_after_summary = $('sClean').checked;
+  if (v('sApiBase')) patch.api_base_url = v('sApiBase');
+  if (v('sApiKey')) patch.api_key = v('sApiKey');
+  if (v('sApiModel')) patch.api_model = v('sApiModel');
+  patch.export_prompt = $('sPrompt').value;
+  try {
+    await api('/api/v1/config', {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(patch)});
+    await api('/api/v1/autostart', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({done: $('sAuto').checked})});
+    toast('设置已保存 ✅', 'ok');
+  } catch(e) { toast(String(e), 'err'); }
+  closeModal(); refreshStatus(); refreshPipeline();
+}
+
+/* ================= 拖拽回流 ================= */
+document.addEventListener('dragover', e => { e.preventDefault(); const dz = $('drop'); if (dz) dz.classList.add('hot'); });
+document.addEventListener('dragleave', e => { const dz = $('drop'); if (dz) dz.classList.remove('hot'); });
+document.addEventListener('drop', async e => {
+  e.preventDefault(); const dz = $('drop'); if (dz) dz.classList.remove('hot');
+  const f = e.dataTransfer.files[0]; if (!f || !curDay) return;
+  try {
+    if (f.name.toLowerCase().endsWith('.zip')) {
+      const buf = await f.arrayBuffer();
+      const r = await fetch('/api/v1/reflow/zip', {method:'POST', body: buf}).then(r => r.json());
+      toast(`zip 总结已回流 ${r.day} ✅`, 'ok');
+    } else if (f.name.toLowerCase().endsWith('.md')) {
+      const text = await f.text();
+      const r = await api('/api/v1/reflow/text', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({text, day: curDay})});
+      toast(`md 总结已回流 ${r.day} ✅`, 'ok');
+    } else { toast('请拖入 .zip 或 .md 总结包', 'err'); return; }
+  } catch(err) { toast(String(err), 'err'); return; }
+  loadDay(curDay);
+});
+
+/* ================= 启动 ================= */
+async function refreshApiBtn(){
+  try { const s = await api('/api/v1/llm/status'); $('btnApi').style.display = s.available ? '' : 'none'; } catch(e) {}
+}
+const now = new Date(); calY = now.getFullYear(); calM = now.getMonth();
+refreshStatus(); refreshPipeline(); refreshDays(); refreshApiBtn();
+setInterval(() => { refreshStatus(); refreshPipeline(); refreshDays(); if (activeTab === 'log') bindDayEvents(curDay); }, 5000);
 </script>
 </body></html>

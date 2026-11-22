@@ -1,13 +1,16 @@
 """EchoCard 启动入口。
 
-M1（当前）：python -m echocard --dev
-  本地服务 + USB 认亲监听 + 照片目录监控（前台运行，控制台打印地址）
-M4（规划）：--window 以 PyWebView 独立窗口启动 + pystray 托盘 + Toast 通知
+模式：
+  python -m echocard            → 独立桌面窗口 + 托盘 + Toast（默认）
+  python -m echocard --dev      → 前台本地服务（开发/验收模式，浏览器访问）
+  python -m echocard --no-usb   → 禁用 USB 监听
+  python -m echocard --window-only → 只开桌面窗口（服务线程内启动）
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import threading
 from pathlib import Path
 
 from .core.config import APP_VERSION, AppConfig
@@ -21,20 +24,8 @@ from .ingest.usb_monitor import UsbMonitor
 log = logging.getLogger(__name__)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="echocard", description="EchoCard 本地服务")
-    parser.add_argument("--config", help="配置文件路径（默认 %%APPDATA%%/EchoCard/config.json）")
-    parser.add_argument("--data-root", help="覆盖数据根目录（便携/调试）")
-    parser.add_argument("--dev", action="store_true", help="前台运行并打印访问地址")
-    parser.add_argument("--no-usb", action="store_true", help="禁用 USB 监听（纯服务模式）")
-    parser.add_argument("--version", action="version", version=f"EchoCard {APP_VERSION}")
-    args = parser.parse_args()
-
-    cfg = AppConfig.load(Path(args.config) if args.config else None)
-    if args.data_root:
-        cfg.data_root = args.data_root
-    cfg.save()
-
+def _build_runtime(cfg: AppConfig, args) -> tuple:
+    """装配 DB / 事件 / 流水线 / 监听器 → (app, db, cfg, events, watcher, monitor, pipeline)."""
     setup_logging(cfg.subdir("logs"))
     log.info("EchoCard v%s 启动 · 数据目录：%s", APP_VERSION, cfg.data_root)
 
@@ -51,7 +42,6 @@ def main() -> None:
     from .pipeline import Pipeline
 
     pipeline = Pipeline(db, cfg, events)
-    # 导入完成 → 分界线内日期自动入队（历史日期不自动转写）
     events.subscribe(
         "pipeline.day_ready",
         lambda d: pipeline.enqueue(d["day"])
@@ -66,26 +56,83 @@ def main() -> None:
     watcher = PhotoWatcher(db, cfg)
     watcher.start()
 
-    # 启动即扫描补全未处理日期（线程内执行，避免阻塞服务启动）
-    import threading as _threading
-
-    _threading.Thread(target=pipeline.run_auto, daemon=True).start()
+    threading.Thread(target=pipeline.run_auto, daemon=True).start()
 
     from .desktop.server import create_app
 
     app = create_app(db, cfg, events, importer, watcher=watcher,
                      monitor=monitor, pipeline=pipeline)
-    url = f"http://127.0.0.1:{cfg.server_port}"
-    log.info("控制台：%s      手机传图（局域网）：%s/upload", url, url)
+    return app, db, watcher, monitor, pipeline
 
-    try:
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="echocard", description="EchoCard 本地服务")
+    parser.add_argument("--config", help="配置文件路径（默认 %%APPDATA%%/EchoCard/config.json）")
+    parser.add_argument("--data-root", help="覆盖数据根目录（便携/调试）")
+    parser.add_argument("--dev", action="store_true", help="前台运行服务（浏览器访问，不开窗口）")
+    parser.add_argument("--no-usb", action="store_true", help="禁用 USB 监听")
+    parser.add_argument("--version", action="version", version=f"EchoCard {APP_VERSION}")
+    args = parser.parse_args()
+
+    cfg = AppConfig.load(Path(args.config) if args.config else None)
+    if args.data_root:
+        cfg.data_root = args.data_root
+    cfg.save()
+
+    app, db, watcher, monitor, pipeline = _build_runtime(cfg, args)
+    url = f"http://127.0.0.1:{cfg.server_port}"
+
+    if args.dev:
+        log.info("控制台：%s      手机传图（局域网）：%s/upload", url, url)
+        try:
+            import uvicorn
+
+            uvicorn.run(app, host="127.0.0.1", port=cfg.server_port, log_level="warning")
+        finally:
+            watcher.stop()
+            if monitor:
+                monitor.stop()
+            pipeline.stop_worker()
+            db.close()
+        return
+
+    # ---------- 桌面模式：服务线程 + PyWebView 窗口 + 托盘 + Toast ----------
+    from .desktop.toast import notify
+    from .desktop.tray import build_tray
+    from .desktop.window import WindowShell
+
+    def _serve():
         import uvicorn
 
-        uvicorn.run(app, host="127.0.0.1", port=cfg.server_port, log_level="warning")
+        uvicorn.run(app, host="127.0.0.1", port=cfg.server_port,
+                    log_level="warning", access_log=False)
+
+    threading.Thread(target=_serve, daemon=True, name="uvicorn").start()
+
+    shell = WindowShell(url)
+    quit_event = threading.Event()
+    icon = build_tray(
+        on_open=shell.open,
+        on_quit=quit_event.set,
+        server_url=url,
+    )
+    notify("EchoCard 已启动", f"本地记忆工作台就绪：{url}")
+    shell.open()
+    log.info("桌面模式运行中（%s）· 托盘常驻 · 完全退出请走托盘菜单", url)
+
+    try:
+        while not quit_event.wait(1.0):
+            pass
     finally:
+        log.info("EchoCard 完全退出")
+        pipeline.stop_worker()
         watcher.stop()
         if monitor:
             monitor.stop()
+        try:
+            icon.stop()
+        except Exception:
+            pass
         db.close()
 
 

@@ -326,6 +326,26 @@ def create_app(
             _valid_day(d)
         return export_days(db, cfg, body.days)
 
+    class OpenFolderBody(BaseModel):
+        path: str
+
+    @app.post("/api/v1/export/open")
+    def export_open(body: OpenFolderBody) -> dict:
+        """打开导出文件夹（仅允许 data_root/exports 下的路径）。"""
+        import os
+
+        p = Path(body.path).resolve()
+        allowed_root = Path(cfg.subdir("exports")).resolve()
+        if allowed_root not in p.parents and p != allowed_root:
+            raise HTTPException(400, "仅允许打开导出目录")
+        if p.is_file():
+            os.startfile(str(p.parent))  # noqa: S606
+        elif p.is_dir():
+            os.startfile(str(p))  # noqa: S606
+        else:
+            raise HTTPException(404, "路径不存在")
+        return {"ok": True}
+
     @app.get("/api/v1/export/preview")
     def export_preview(days: str) -> dict:
         """days=2026-11-22,2026-11-23 → 返回投喂 Markdown 预览与一键复制文本。"""
@@ -420,6 +440,96 @@ def create_app(
         from ..export.cleanup import cleanup_day
 
         return cleanup_day(db, cfg, body.day, body.keep_unrecognized_music)
+
+    # ================= M4：日历状态 / 试听 / 照片勾选 / 开机自启 =================
+    @app.get("/api/v1/days")
+    def days_overview() -> dict:
+        """月历数据：每天 → 状态点（gray 处理中 / blue 待投喂 / green 已归档）。"""
+        rows = db.query(
+            "SELECT recorded_at AS day,"
+            " SUM(CASE WHEN status != 'done' THEN 1 ELSE 0 END) AS pending,"
+            " COUNT(*) AS files FROM ingest_files GROUP BY recorded_at"
+        )
+        seg_days = {r["day"]: r["c"] for r in db.query(
+            "SELECT day, COUNT(*) c FROM audio_segments GROUP BY day")}
+        photo_days = {r["day"]: r["c"] for r in db.query(
+            "SELECT captured_at AS day, COUNT(*) c FROM photos GROUP BY captured_at")}
+        summary_days = {r["day_range"] for r in db.query(
+            "SELECT DISTINCT day_range FROM daily_summaries")}
+        since = cfg.auto_transcribe_since
+        out = []
+        for r in rows:
+            day = r["day"]
+            if day in summary_days:
+                state = "green"
+            elif r["pending"] and r["pending"] > 0:
+                state = "gray"
+            elif seg_days.get(day):
+                state = "blue"
+            else:
+                state = "gray" if day >= since else "blue"  # 历史归档日视为可投喂
+            out.append({"day": day, "state": state, "files": r["files"],
+                        "segments": seg_days.get(day, 0), "photos": photo_days.get(day, 0),
+                        "historical": day < since})
+        # 纯照片日期（无音频）
+        for day, c in photo_days.items():
+            if day not in {x["day"] for x in out}:
+                out.append({"day": day, "state": "green" if day in summary_days else "blue",
+                            "files": 0, "segments": 0, "photos": c,
+                            "historical": day < since})
+        # 纯 AI 总结日期（无音频/照片）
+        known = {x["day"] for x in out}
+        for day in summary_days:
+            if day not in known:
+                out.append({"day": day, "state": "green", "files": 0, "segments": 0,
+                            "photos": 0, "historical": day < since})
+        return {"days": sorted(out, key=lambda x: x["day"]),
+                "auto_transcribe_since": since}
+
+    @app.get("/api/v1/audio/clip")
+    def audio_clip(day: str, name: str) -> FileResponse:
+        _valid_day(day)
+        if not _re.fullmatch(r"speaker\d+_\d+\.wav", name):
+            raise HTTPException(400, "非法切片名")
+        path = cfg.subdir("audio", day, "clips") / name
+        if not path.exists():
+            raise HTTPException(404, "切片不存在")
+        return FileResponse(path, media_type="audio/wav")
+
+    @app.get("/static-photo")
+    def static_photo(src: str) -> FileResponse:
+        """压缩照片预览（仅允许数据目录内路径）。"""
+        p = Path(src)
+        allowed = cfg.data_root_path().resolve()
+        try:
+            p = p.resolve()
+            if allowed not in p.parents:
+                raise HTTPException(400, "路径越界")
+        except OSError:
+            raise HTTPException(400, "路径无效")
+        if not p.exists():
+            raise HTTPException(404, "照片不存在")
+        media = "image/heic" if p.suffix.lower() == ".heic" else "image/jpeg"
+        return FileResponse(p, media_type=media)
+
+    @app.post("/api/v1/photos/{photo_id}/include")
+    def photo_include(photo_id: int, body: StarBody) -> dict:
+        db.execute("UPDATE photos SET include_in_export=? WHERE id=?",
+                   (1 if body.starred else 0, photo_id))
+        return {"ok": True}
+
+    @app.get("/api/v1/autostart")
+    def autostart_status() -> dict:
+        from .autostart import is_enabled
+
+        return {"enabled": is_enabled()}
+
+    @app.post("/api/v1/autostart")
+    def autostart_set(body: TodoToggleBody) -> dict:
+        from .autostart import set_enabled
+
+        set_enabled(bool(body.done))
+        return {"ok": True, "enabled": body.done}
 
     @app.get("/api/v1/llm/status")
     def llm_status() -> dict:
