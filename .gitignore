@@ -1,0 +1,46 @@
+# ===== EchoCard 隐私红线：一切运行时个人数据不入公开仓库 =====
+# 所有录音/照片/数据库/声纹/导出包/日志强制收敛进 data/（或用户自定义数据根目录）
+data/
+models/
+exports/
+!docs/assets/
+!docs/fixtures/
+
+# 二次防线：即使误放到别处也拦下（仅拦媒体与库文件，不拦文档用 png/jpg）
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.wav
+*.opus
+*.m4a
+*.flac
+*.heic
+*.webp
+*.log
+
+# 密钥与本地配置
+.env
+.env.*
+secrets*
+config.local.json
+
+# ===== Python 开发产物 =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
