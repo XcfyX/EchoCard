@@ -171,7 +171,12 @@ def transcribe_file(engines: Engines, wav16k: str, file_start: datetime,
                     chunk = gap[w0:w0 + window]
                     if len(chunk) < int(0.5 * rate):
                         break
-                    if tagger.music_score(chunk) >= 0.30:
+                    try:
+                        score = tagger.music_score(chunk)
+                    except Exception:
+                        log.warning("YAMNet 打标异常，跳过该窗口（兜底降级不影响转写）", exc_info=True)
+                        continue
+                    if score >= 0.30:
                         music.append(Segment(
                             start_s=(g0 + w0) / rate, end_s=(g0 + len(chunk)) / rate,
                             events=["Music"], audio_tags=["music", "instrumental_or_bgm"],
