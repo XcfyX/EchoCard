@@ -98,6 +98,13 @@ class Engines:
                 self._embed = sherpa_onnx.SpeakerEmbeddingExtractor(config)
             return self._embed
 
+    def embedding(self, samples: "np.ndarray") -> "np.ndarray":
+        """16kHz float32 波形 → CAM++ 声纹向量（sherpa 2.x 需经 OnlineStream）。"""
+        ext = self.embed()
+        stream = ext.create_stream()
+        stream.accept_waveform(16000, samples.astype(np.float32))
+        return np.asarray(ext.compute(stream), dtype=np.float32)
+
     @property
     def vad_model_path(self) -> Path:
         v5 = models_dir(self.cfg) / "silero_vad_v5.onnx"
@@ -126,7 +133,7 @@ class Engines:
 class YamnetTagger:
     """YAMNet ONNX 直推：music_score(samples) → 0~1 音乐概率。
 
-    YAMNet 输入为 0.975s/15600 样本帧（16kHz float32）；输出 [1,521] 分数。
+    YAMNet 输入为 0.975s/15600 样本帧（16kHz float32，1-D）；输出 [T, 521] 分数。
     """
 
     FRAME = 15600
@@ -150,11 +157,14 @@ class YamnetTagger:
         log.info("YAMNet 就绪：音乐类标签索引 %d 个", len(self.music_idx))
 
     def music_score(self, samples: "np.ndarray") -> float:
-        """一段 16kHz float32 波形的音乐概率（多帧取最大值）。"""
+        """一段 16kHz float32 波形的音乐概率（多帧取最大值）。
+
+        本 onnx 导出输入为 1-D waveform（15600 样本/帧），输出 [T, 521]。
+        """
         best = 0.0
         n = len(samples)
         for i in range(0, max(0, n - self.FRAME + 1), self.FRAME):
-            frame = samples[i:i + self.FRAME].astype(np.float32)[None, :]
+            frame = samples[i:i + self.FRAME].astype(np.float32)
             out = self.sess.run(None, {self.input_name: frame})
             scores = np.asarray(out[0]).reshape(-1)
             if self.music_idx:

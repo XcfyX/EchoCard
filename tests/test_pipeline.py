@@ -16,21 +16,15 @@ from echocard.pipeline import Pipeline
 from conftest import make_wav
 
 
-class FakeExtractor:
-    """确定性假声纹：按样本长度奇偶给出两个不同向量族。"""
-
-    def compute(self, samples) -> np.ndarray:
-        v = 1.0 if (len(samples) // 16000) % 2 == 0 else 0.25
-        out = np.full(192, v, dtype=np.float32)
-        return out / np.linalg.norm(out)
-
-
 class FakeEngines:
     def __init__(self):
         self.provider_used = "cpu"
 
-    def embed(self):
-        return FakeExtractor()
+    def embedding(self, samples) -> np.ndarray:
+        """确定性假声纹：按样本长度奇偶给出两个不同向量族。"""
+        v = 1.0 if (len(samples) // 16000) % 2 == 0 else 0.25
+        out = np.full(192, v, dtype=np.float32)
+        return out / np.linalg.norm(out)
 
 
 def _fake_transcribe_factory(segments_by_file):

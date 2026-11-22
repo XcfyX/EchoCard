@@ -187,12 +187,11 @@ class Pipeline:
                 return {"ok": False, "note": "all files failed"}
 
             # ---- 2. 声纹 Embedding + 当日无监督聚类 ----
-            extractor = self.engines.embed()
             for fid, (wav16k, _s, _r) in file_info.items():
                 pcm, rate = read_pcm16(wav16k)
                 samples = np.frombuffer(bytes(pcm), dtype=np.int16).astype(np.float32) / 32768.0
                 for seg in [s for s in speech_all if s.file_id == fid and s.duration >= 1.0]:
-                    seg.embedding = extractor.compute(
+                    seg.embedding = self.engines.embedding(
                         samples[int(seg.start_s * rate):int(seg.end_s * rate)])
             diarize.cluster_segments(speech_all, self.cfg.cluster_distance_threshold)
 
