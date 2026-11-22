@@ -111,14 +111,22 @@ class DeviceImporter:
 
     # ------------------------------------------------------------------ 扫描
     def _cleanup_stale_tmp(self, root: Path) -> None:
-        """清理历史中断遗留的临时文件（临时名含创建进程 PID）。"""
-        for p in root.rglob(".tmp-*"):
-            try:
-                if p.is_file() and int(p.name.split("-")[1]) != os.getpid():
-                    p.unlink(missing_ok=True)
-                    log.info("清理历史中断临时文件：%s", p.name)
-            except (ValueError, OSError):
+        """清理历史中断遗留的临时文件（设备侧 + 本地暂存目录，临时名含创建进程 PID）。"""
+        roots = [root]
+        try:
+            roots.append(self.cfg.data_root_path() / "audio")
+        except Exception:
+            pass
+        for base in roots:
+            if not Path(base).exists():
                 continue
+            for p in Path(base).rglob(".tmp-*"):
+                try:
+                    if p.is_file() and int(p.name.split("-")[1]) != os.getpid():
+                        p.unlink(missing_ok=True)
+                        log.info("清理历史中断临时文件：%s", p)
+                except (ValueError, OSError):
+                    continue
 
     def _scan_wavs(self, root: Path) -> list[Path]:
         out: list[Path] = []
