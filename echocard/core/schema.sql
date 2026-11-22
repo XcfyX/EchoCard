@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS ingest_files (
     error             TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ingest_date ON ingest_files(recorded_at);
+-- 防重复导入：同一路径（设备内同一段录音）只允许一行；
+-- 历史库中的重复行由运维脚本/真值仲裁清理后索引才能建立
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ingest_src ON ingest_files(src_path);
 
 CREATE TABLE IF NOT EXISTS photos (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
