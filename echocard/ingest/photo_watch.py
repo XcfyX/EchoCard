@@ -55,14 +55,16 @@ class PhotoWatcher:
     # ---- 生命周期 ----
     def start(self) -> None:
         self._reschedule()
+        self._observer.start()  # 必须启动观察者线程，否则监控完全不生效
         self._worker = threading.Thread(target=self._worker_loop, name="photo-watch", daemon=True)
         self._worker.start()
         log.info("照片目录监控已启动：%s", self.cfg.watched_photo_dirs or "（未配置目录）")
 
     def stop(self) -> None:
         self._stop.set()
-        self._observer.stop()
-        self._observer.join(timeout=3)
+        if self._observer.is_alive():
+            self._observer.stop()
+            self._observer.join(timeout=3)
 
     def reschedule(self) -> None:
         """配置变更后重新挂载监控目录（供设置页调用）。"""
