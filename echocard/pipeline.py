@@ -3,16 +3,23 @@
 业务规则（拍板补充）：
 - 历史归档分界线 auto_transcribe_since：早于该日期的录音只归档保留原 WAV，
   不自动转写；用户可在界面手动触发（keep_raw=True，保留原 WAV）；
-- 自动补全：>= 分界线的所有未处理日期，按日期倒序（最新优先）一次性补全，
-  无论分几天同步进来；
+- 自动补全：>= 分界线的所有未处理日期，按日期倒序（最新优先）一次性补全；
 - 瘦身：转写/声纹/音乐完成后原 WAV → Opus（约 15MB/小时）并删除原始巨型 WAV；
 - 反偏见：片段只增不删，audio_tags 只存客观特征。
+
+并发与一致性（2026-11-23 修复）：
+- 所有日处理都在单一工作线程串行执行；手动触发只入队，不再另起线程，
+  杜绝同一天被两个 process_day 同时跑（此前导致重复转写 + 互相删库）；
+- 写库按「本次处理的文件」作用域删除，已 done 的文件分段绝不被误删；
+- 保留分段与新分段共存时，新聚类编号从既有最大编号之后顺延，避免 ID 冲突；
+- 启动时把中断遗留的 processing 行复位为 imported，pending 才可能清零。
 """
 from __future__ import annotations
 
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -29,9 +36,24 @@ from .audio.vad_asr import Segment, transcribe_file
 
 log = logging.getLogger(__name__)
 
+# 进度阶段（权重之和 100）
+STAGES = [
+    ("prepare", "准备引擎", 3),
+    ("transcribe", "转码 + 转写", 62),
+    ("embed", "声纹提取", 10),
+    ("cluster", "说话人聚类", 5),
+    ("write", "写入时间轴", 10),
+    ("music", "音乐节点", 2),
+    ("opus", "压缩瘦身", 8),
+]
+
 
 def _hms(dt: datetime) -> str:
     return dt.strftime("%H:%M:%S")
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 class Pipeline:
@@ -41,11 +63,15 @@ class Pipeline:
         self.cfg = cfg
         self.events = events
         self._engines = engines
-        self._queue: list[str] = []
-        self._lock = threading.Lock()
+        self._queue: list[dict] = []          # [{day, keep_raw, reason, queued_at}]
+        self._lock = threading.RLock()
+        self._process_lock = threading.Lock()  # 硬保证 process_day 串行
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
-        self.current_day: str | None = None
+        self._current: dict | None = None
+        self._progress: dict = {}
+        self._last_scan_at: str | None = None
+        self._last_scan_result: dict | None = None
 
     # ---------------------------------------------------------------- 引擎
     @property
@@ -53,6 +79,24 @@ class Pipeline:
         if self._engines is None:
             self._engines = get_engines(self.cfg)
         return self._engines
+
+    @property
+    def current_day(self) -> str | None:
+        with self._lock:
+            return self._current["day"] if self._current else None
+
+    # ---------------------------------------------------------------- 状态恢复
+    def recover_stalled(self) -> int:
+        """把上次异常中断遗留的 processing 行复位为 imported（可被重新处理）。"""
+        n = self.db.query_one(
+            "SELECT COUNT(*) c FROM ingest_files WHERE status='processing'")["c"]
+        if n:
+            self.db.execute(
+                "UPDATE ingest_files SET status='imported', error=NULL"
+                " WHERE status='processing'")
+            log.info("启动恢复：%d 个中断遗留的 processing 文件已复位为待处理", n)
+            self._publish("pipeline.recovered", {"files": n})
+        return n
 
     # ---------------------------------------------------------------- 调度
     def start_worker(self) -> None:
@@ -66,33 +110,58 @@ class Pipeline:
         self._stop.set()
 
     def enqueue(self, day: str) -> None:
+        """兼容旧接口（事件订阅用）：自动补全入队。"""
+        self.queue_day(day, reason="auto")
+
+    def queue_day(self, day: str, keep_raw: bool | None = None,
+                  reason: str = "auto") -> dict:
+        """入队某日处理。返回 {status: queued|already_queued|already_processing, position}。"""
         with self._lock:
-            if day not in self._queue:
-                self._queue.append(day)
+            if self._current and self._current["day"] == day:
+                return {"status": "already_processing", "day": day}
+            if any(item["day"] == day for item in self._queue):
+                pos = next(i for i, x in enumerate(self._queue) if x["day"] == day) + 1
+                return {"status": "already_queued", "day": day, "position": pos}
+            self._queue.append({"day": day, "keep_raw": keep_raw,
+                                "reason": reason, "queued_at": _now()})
+            pos = len(self._queue)
+        log.info("流水线入队：%s（来源 %s，队列位置 %d）", day, reason, pos)
+        self._publish("pipeline.queued", {"day": day, "reason": reason, "position": pos})
+        return {"status": "queued", "day": day, "position": pos}
+
+    def queue_snapshot(self) -> list[dict]:
+        with self._lock:
+            return [dict(x, position=i + 1) for i, x in enumerate(self._queue)]
 
     def _worker_loop(self) -> None:
-        import time
-
         last_scan = 0.0
         while not self._stop.is_set():
             with self._lock:
-                day = self._queue.pop(0) if self._queue else None
-            if day is None:
-                # 每 2 分钟自动扫描补全（覆盖分几天同步进来的场景）
+                item = self._queue[0] if self._queue else None
+                if item:
+                    self._queue.pop(0)
+                    self._current = item
+            if item is None:
                 if time.time() - last_scan >= 120:
                     last_scan = time.time()
                     try:
-                        for d in self.run_auto():
-                            pass
+                        self.run_auto()
                     except Exception:
                         log.exception("流水线自动扫描异常")
                 self._stop.wait(5.0)
                 continue
             try:
-                self.process_day(day, keep_raw=False)
+                keep_raw = item.get("keep_raw")
+                if keep_raw is None:
+                    keep_raw = item["day"] < self.cfg.auto_transcribe_since
+                self.process_day(item["day"], keep_raw=keep_raw, reason=item["reason"])
             except Exception:
-                log.exception("流水线处理 %s 异常", day)
-                self._publish("pipeline.day_failed", {"day": day})
+                log.exception("流水线处理 %s 异常", item["day"])
+                self._publish("pipeline.day_failed", {"day": item["day"]})
+            finally:
+                with self._lock:
+                    self._current = None
+                    self._progress = {}
 
     def _publish(self, topic: str, data: dict) -> None:
         if self.events:
@@ -101,6 +170,7 @@ class Pipeline:
             except Exception:
                 log.exception("事件发布失败：%s", topic)
 
+    # ---------------------------------------------------------------- 扫描
     def pending_days(self) -> list[str]:
         """>= 分界线、存在未完成文件的日期，按日期倒序（最新优先）。"""
         since = self.cfg.auto_transcribe_since
@@ -109,10 +179,7 @@ class Pipeline:
             " AS pending FROM ingest_files WHERE recorded_at >= ?"
             " GROUP BY recorded_at", (since,)
         )
-        return sorted(
-            (r["d"] for r in rows if r["pending"] and r["pending"] > 0),
-            reverse=True,
-        )
+        return sorted((r["d"] for r in rows if r["pending"] and r["pending"] > 0), reverse=True)
 
     def historical_days(self) -> list[str]:
         """早于分界线的历史归档日期（保留原 WAV，仅手动触发）。"""
@@ -126,42 +193,161 @@ class Pipeline:
         """全量自动补全：扫描所有未处理日期并入队（最新日期优先出结果）。"""
         from .audio.engines import resolve_model
 
+        scan_at = _now()
+        with self._lock:
+            self._last_scan_at = scan_at
         try:
             resolve_model(self.cfg, "sensevoice-int8.onnx")
         except FileNotFoundError:
-            return []  # 模型未就绪：静默等待 setup_models.py 完成
+            with self._lock:
+                self._last_scan_result = {
+                    "at": scan_at, "days": [], "queued": 0,
+                    "note": "本地模型未就绪，已跳过（先运行 scripts/setup_models.py）",
+                }
+            return []
         days = self.pending_days()
-        for d in days:
-            self.enqueue(d)
+        results = [self.queue_day(d, reason="auto") for d in days]
+        queued = sum(1 for r in results if r["status"] == "queued")
+        detail = {d: self.day_detail(d) for d in days}
+        with self._lock:
+            self._last_scan_result = {
+                "at": scan_at, "days": days, "queued": queued,
+                "already_queued": sum(1 for r in results if r["status"] == "already_queued"),
+                "already_processing": sum(
+                    1 for r in results if r["status"] == "already_processing"),
+                "detail": detail,
+                "note": (f"扫描完成：{len(days)} 天存在未处理文件（新入队 {queued} 天）"
+                         if days else "扫描完成：全部日期均已处理，无待入队项目"),
+            }
         if days:
-            self._publish("pipeline.scan_done", {"queued_days": days})
+            self._publish("pipeline.scan_done",
+                          {"queued_days": days, "queued": queued, "detail": detail})
         return days
 
+    def day_detail(self, day: str) -> dict:
+        """某日的文件进度明细。"""
+        row = self.db.query_one(
+            "SELECT COUNT(*) files,"
+            " SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) done,"
+            " SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) processing,"
+            " SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed"
+            " FROM ingest_files WHERE recorded_at=?", (day,)
+        )
+        segs = self.db.query_one(
+            "SELECT COUNT(*) c FROM audio_segments WHERE day=?", (day,))["c"]
+        files = row["files"] or 0
+        done = row["done"] or 0
+        return {
+            "day": day, "files": files, "done": done,
+            "processing": row["processing"] or 0, "failed": row["failed"] or 0,
+            "pending": files - done,
+            "segments": segs,
+            "historical": day < self.cfg.auto_transcribe_since,
+            "percent": round(done / files * 100) if files else 100,
+        }
+
+    def days_detail(self, limit: int = 14) -> list[dict]:
+        days = sorted({r["day"] for r in self.db.query(
+            "SELECT DISTINCT recorded_at AS day FROM ingest_files")}, reverse=True)[:limit]
+        return [self.day_detail(d) for d in days]
+
+    def progress_snapshot(self) -> dict:
+        with self._lock:
+            p = dict(self._progress)
+            cur = dict(self._current) if self._current else None
+            queue = [dict(x, position=i + 1) for i, x in enumerate(self._queue)]
+            return {"progress": p, "current": cur, "queue": queue,
+                    "last_scan_at": self._last_scan_at,
+                    "last_scan_result": self._last_scan_result}
+
+    # ---------------------------------------------------------------- 进度
+    def _stage(self, stage: str, *, file_index: int = 0, file_total: int = 0,
+               file_name: str = "", extra: str = "") -> None:
+        """更新阶段进度（单调递增的百分比）。"""
+        start = 0
+        for name, _label, weight in STAGES:
+            if name == stage:
+                break
+            start += weight
+        label = next(lb for n, lb, _w in STAGES if n == stage)
+        weight = next(w for n, _lb, w in STAGES if n == stage)
+        frac = (file_index / file_total) if file_total and stage == "transcribe" else 0.0
+        if stage == "opus" and file_total:
+            frac = file_index / file_total
+        pct = int(start + weight * frac)
+        with self._lock:
+            self._progress = {
+                "day": (self._current or {}).get("day"),
+                "stage": stage, "stage_label": label,
+                "percent": min(99, max(0, pct)),
+                "file_index": file_index, "file_total": file_total,
+                "file_name": file_name, "extra": extra,
+                "updated_at": _now(),
+                "started_at": (self._progress.get("started_at")
+                               or (self._current or {}).get("queued_at") or _now()),
+            }
+        self._publish("pipeline.stage", {
+            "day": (self._current or {}).get("day"), "stage": stage,
+            "label": label, "percent": pct,
+            "file": file_name, "file_index": file_index, "file_total": file_total,
+        })
+
     # ---------------------------------------------------------------- 单日处理
-    def process_day(self, day: str, keep_raw: bool | None = None) -> dict:
+    def process_day(self, day: str, keep_raw: bool | None = None,
+                    reason: str = "auto") -> dict:
         if keep_raw is None:
-            keep_raw = day < self.cfg.auto_transcribe_since  # 历史日手动触发保留原 WAV
+            keep_raw = day < self.cfg.auto_transcribe_since
+        if not self._process_lock.acquire(blocking=False):
+            log.warning("%s 已有处理在运行，跳过重复调用", day)
+            return {"ok": False, "note": "already running"}
+        try:
+            return self._process_day(day, keep_raw, reason)
+        finally:
+            self._process_lock.release()
+
+    def _process_day(self, day: str, keep_raw: bool, reason: str) -> dict:
         rows = self.db.query(
             "SELECT id, raw_path, recorded_ts FROM ingest_files"
             " WHERE recorded_at=? AND status != 'done' ORDER BY id", (day,)
         )
         if not rows:
             return {"ok": True, "note": "no pending files"}
+        # 找回原始 WAV：此前瘦身过（原始已删）的文件无法重转，跳过并说明
+        runnable = []
+        for r in rows:
+            p = Path(r["raw_path"]) if r["raw_path"] else None
+            if p and p.exists():
+                runnable.append(r)
+            else:
+                log.info("%s 原始 WAV 不存在（可能已瘦身），跳过", r["raw_path"])
+        if not runnable:
+            self.db.execute(
+                "UPDATE ingest_files SET status='done' WHERE recorded_at=?"
+                " AND status='processing'", (day,))
+            return {"ok": True, "note": "无可用原始 WAV（均已瘦身），已标记完成"}
 
-        self.current_day = day
-        self._publish("pipeline.day_start", {"day": day, "files": len(rows)})
+        with self._lock:
+            self._current = {"day": day, "keep_raw": keep_raw, "reason": reason,
+                             "queued_at": self._current.get("queued_at") if self._current else _now()}
+        self._publish("pipeline.day_start",
+                      {"day": day, "files": len(runnable), "reason": reason})
+        self._stage("prepare")
+
         speech_all: list[Segment] = []
         music_all: list[Segment] = []
-        file_info: dict[int, tuple[Path, datetime, Path]] = {}  # fid -> (16k, start_dt, raw)
+        file_info: dict[int, tuple[Path, datetime, Path]] = {}
         failed_files: list[str] = []
 
         try:
-            # ---- 1. 转码 + 转写 ----
-            for row in rows:
+            # ---- 1. 转码 + 转写（逐文件汇报进度）----
+            total = len(runnable)
+            for i, row in enumerate(runnable, 1):
                 fid = row["id"]
                 raw = Path(row["raw_path"])
                 self.db.execute("UPDATE ingest_files SET status='processing' WHERE id=?", (fid,))
                 start_dt = self._file_start(row, day)
+                self._stage("transcribe", file_index=i - 1, file_total=total,
+                            file_name=raw.name)
                 try:
                     wav16k = to_16k_mono(
                         raw, self.cfg.subdir("audio", day, "16k") / f"{raw.stem}.wav")
@@ -175,27 +361,42 @@ class Pipeline:
                     log.exception("文件转写失败：%s", raw)
                     self.db.execute(
                         "UPDATE ingest_files SET status='failed', error=? WHERE id=?",
-                        (str(e)[:300], fid),
-                    )
+                        (str(e)[:300], fid))
                     self._publish("pipeline.file_failed",
-                                        {"day": day, "file": raw.name, "error": str(e)[:200]})
+                                  {"day": day, "file": raw.name, "error": str(e)[:200]})
                     failed_files.append(raw.name)
+                self._stage("transcribe", file_index=i, file_total=total,
+                            file_name=raw.name)
 
             if not file_info:
                 self._publish("pipeline.day_done",
-                                    {"day": day, "segments": 0, "note": "all files failed"})
-                return {"ok": False, "note": "all files failed"}
+                              {"day": day, "segments": 0, "note": "all files failed"})
+                return {"ok": False, "note": "all files failed",
+                        "failed_files": failed_files}
 
-            # ---- 2. 声纹 Embedding + 当日无监督聚类 ----
+            # ---- 2. 声纹 Embedding ----
+            self._stage("embed")
             for fid, (wav16k, _s, _r) in file_info.items():
                 pcm, rate = read_pcm16(wav16k)
                 samples = np.frombuffer(bytes(pcm), dtype=np.int16).astype(np.float32) / 32768.0
                 for seg in [s for s in speech_all if s.file_id == fid and s.duration >= 1.0]:
                     seg.embedding = self.engines.embedding(
                         samples[int(seg.start_s * rate):int(seg.end_s * rate)])
-            diarize.cluster_segments(speech_all, self.cfg.cluster_distance_threshold)
 
-            # ---- 3. 说话人视图（软匹配）+ 代表切片 ----
+            # ---- 3. 当日无监督聚类（新编号顺延既有编号，避免与保留分段冲突）----
+            self._stage("cluster")
+            diarize.cluster_segments(speech_all, self.cfg.cluster_distance_threshold)
+            fids = list(file_info)
+            existing_max = self.db.query_one(
+                "SELECT MAX(cluster_id) m FROM audio_segments"
+                " WHERE day=? AND file_id NOT IN (%s)" % ",".join(str(int(x)) for x in fids),
+                (day,))["m"] or 0
+            if existing_max:
+                for seg in speech_all:
+                    if seg.cluster_id is not None:
+                        seg.cluster_id += existing_max
+                log.info("%s 已有保留分段（最大聚类 %d），新聚类编号顺延", day, existing_max)
+
             speakers_view: dict[int, dict] = {}
             for cid in sorted({s.cluster_id for s in speech_all if s.cluster_id}):
                 name, score, status = None, None, "unmatched"
@@ -210,8 +411,11 @@ class Pipeline:
             reps = {cid: diarize.pick_representative(speech_all, cid, count=3)
                     for cid in speakers_view}
 
-            # ---- 4. 写库：audio_segments + 代表切片 + 声纹 npz ----
-            self.db.execute("DELETE FROM audio_segments WHERE day=?", (day,))
+            # ---- 4. 写库：仅替换本次处理文件的分段（已 done 文件的分段保留）----
+            self._stage("write")
+            in_clause = ",".join(str(int(x)) for x in fids)
+            self.db.execute(
+                f"DELETE FROM audio_segments WHERE day=? AND file_id IN ({in_clause})", (day,))
             emb_store: dict[int, np.ndarray] = {}
             clips_dir = self.cfg.subdir("audio", day, "clips")
             for fid, (wav16k, start_dt, _raw) in file_info.items():
@@ -241,15 +445,12 @@ class Pipeline:
                     if seg.embedding is not None:
                         emb_store[cur.lastrowid] = seg.embedding
 
-            if emb_store:
-                npz = self.cfg.subdir("audio", day) / "embeddings.npz"
-                np.savez_compressed(
-                    npz, ids=np.asarray(sorted(emb_store)),
-                    embs=np.stack([emb_store[k] for k in sorted(emb_store)]),
-                )
+            self._merge_embeddings(day, emb_store)
 
-            # ---- 5. 音乐节点（合并候选 → 挂钟起止）----
-            self.db.execute("DELETE FROM music_tracks WHERE day=? AND status='detected'", (day,))
+            # ---- 5. 音乐节点（仅替换本次文件，保留其他文件的音乐节点）----
+            self._stage("music")
+            self.db.execute(
+                f"DELETE FROM music_tracks WHERE day=? AND file_id IN ({in_clause})", (day,))
             for fid, (wav16k, start_dt, _raw) in file_info.items():
                 fid_music = [m for m in music_all if m.file_id == fid]
                 for s, e, _tags in merge_music_candidates(fid_music):
@@ -257,11 +458,12 @@ class Pipeline:
                         "INSERT INTO music_tracks(file_id, day, start_ts, end_ts,"
                         " audio_path, status) VALUES(?,?,?,?,?,'detected')",
                         (fid, day, _hms(start_dt + timedelta(seconds=s)),
-                         _hms(start_dt + timedelta(seconds=e)), str(wav16k)),
-                    )
+                         _hms(start_dt + timedelta(seconds=e)), str(wav16k)))
 
-            # ---- 6. Opus 瘦身：原始 WAV → Opus →（非历史日）删除原始 WAV ----
-            for fid, (wav16k, _s, raw) in file_info.items():
+            # ---- 6. Opus 瘦身 + 标记完成 ----
+            n_opus = len(file_info)
+            for i, (fid, (wav16k, _s, raw)) in enumerate(file_info.items(), 1):
+                self._stage("opus", file_index=i, file_total=n_opus, file_name=raw.name)
                 opus = self.cfg.subdir("audio", day, "opus") / f"{raw.stem}.opus"
                 wav_to_opus(raw, opus)
                 self.db.execute(
@@ -272,14 +474,17 @@ class Pipeline:
                 self.db.execute(
                     "UPDATE ingest_files SET status='done', error=NULL WHERE id=?", (fid,))
                 self._publish("pipeline.file_done",
-                                    {"day": day, "file": raw.name, "opus": opus.name})
+                              {"day": day, "file": raw.name, "opus": opus.name})
         finally:
-            self.current_day = None
+            with self._lock:
+                self._current = None
+                self._progress = {}
 
+        detail = self.day_detail(day)
         self._publish("pipeline.day_done", {
             "day": day, "segments": len(speech_all),
             "speakers": len(speakers_view), "keep_raw": keep_raw,
-            "failed_files": failed_files,
+            "failed_files": failed_files, "detail": detail,
         })
         try:  # 新片段纳入全文检索
             from .core.fts import rebuild_fts
@@ -289,7 +494,28 @@ class Pipeline:
             log.exception("FTS 重建失败")
         return {"ok": True, "day": day, "segments": len(speech_all),
                 "speakers": len(speakers_view), "failed_files": failed_files,
-                "keep_raw": keep_raw}
+                "keep_raw": keep_raw, "detail": detail}
+
+    def _merge_embeddings(self, day: str, emb_store: dict[int, np.ndarray]) -> None:
+        """合并声纹 npz：保留仍存在于库中的旧向量 + 本次新增向量。"""
+        npz = self.cfg.subdir("audio", day) / "embeddings.npz"
+        valid = {int(r["id"]) for r in self.db.query(
+            "SELECT id FROM audio_segments WHERE day=?", (day,))}
+        ids: dict[int, np.ndarray] = {}
+        if npz.exists():
+            try:
+                data = np.load(npz)
+                for i, e in zip(data["ids"], data["embs"]):
+                    if int(i) in valid:
+                        ids[int(i)] = e
+            except Exception:
+                log.warning("旧 embeddings.npz 读取失败，按本次结果重建", exc_info=True)
+        for i, e in emb_store.items():
+            ids[i] = e
+        if ids:
+            order = sorted(ids)
+            np.savez_compressed(npz, ids=np.asarray(order),
+                                embs=np.stack([ids[i] for i in order]))
 
     # ---------------------------------------------------------------- 内部
     @staticmethod
@@ -316,8 +542,7 @@ class Pipeline:
     def rename_speaker(self, day: str, cluster_id: int, new_name: str) -> int:
         """改名即学：更新该日称呼 → 抽取该聚类优质切片 Embedding 更新声纹库。"""
         rows = self.db.query(
-            "SELECT id FROM audio_segments WHERE day=? AND cluster_id=?", (day, cluster_id)
-        )
+            "SELECT id FROM audio_segments WHERE day=? AND cluster_id=?", (day, cluster_id))
         seg_ids = [r["id"] for r in rows]
         learned = 0
         npz = self.cfg.subdir("audio", day) / "embeddings.npz"
@@ -328,11 +553,10 @@ class Pipeline:
             learned = speakers.learn_from_cluster(self.db, embs, new_name)
         self.db.execute(
             "UPDATE audio_segments SET speaker_name=? WHERE day=? AND cluster_id=?",
-            (new_name, day, cluster_id),
-        )
+            (new_name, day, cluster_id))
         self._publish("speaker.renamed",
-                            {"day": day, "cluster": cluster_id, "name": new_name,
-                             "learned": learned})
+                      {"day": day, "cluster": cluster_id, "name": new_name,
+                       "learned": learned})
         return learned
 
     def merge_speakers(self, day: str, keep_id: int, gone_id: int,
@@ -340,13 +564,11 @@ class Pipeline:
         """合并被拆散的两个聚类，可选合并后命名并学习。"""
         self.db.execute(
             "UPDATE audio_segments SET cluster_id=? WHERE day=? AND cluster_id=?",
-            (keep_id, day, gone_id),
-        )
+            (keep_id, day, gone_id))
         moved = self.db.query_one(
             "SELECT COUNT(*) c FROM audio_segments WHERE day=? AND cluster_id=?",
-            (day, keep_id),
-        )["c"]
+            (day, keep_id))["c"]
         learned = self.rename_speaker(day, keep_id, name) if name else 0
         self._publish("speaker.merged",
-                            {"day": day, "keep": keep_id, "gone": gone_id, "moved": moved})
+                      {"day": day, "keep": keep_id, "gone": gone_id, "moved": moved})
         return learned

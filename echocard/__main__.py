@@ -42,6 +42,7 @@ def _build_runtime(cfg: AppConfig, args) -> tuple:
     from .pipeline import Pipeline
 
     pipeline = Pipeline(db, cfg, events)
+    pipeline.recover_stalled()  # 复位上次中断遗留的 processing 行
     events.subscribe(
         "pipeline.day_ready",
         lambda d: pipeline.enqueue(d["day"])

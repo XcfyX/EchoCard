@@ -92,6 +92,18 @@ class CleanupBody(BaseModel):
     keep_unrecognized_music: bool = True
 
 
+def _models_ready(cfg: AppConfig) -> bool:
+    """本地模型是否齐备（缺模型时流水线会静默跳过，界面需明确提示）。"""
+    try:
+        from ..audio.engines import resolve_model
+
+        resolve_model(cfg, "sensevoice-int8.onnx")
+        resolve_model(cfg, "tokens.txt")
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def create_app(
     db: Database,
     cfg: AppConfig,
@@ -202,30 +214,57 @@ def create_app(
 
     @app.post("/api/v1/pipeline/scan")
     def pipeline_scan() -> dict:
-        days = _require_pipeline().run_auto()
-        return {"ok": True, "queued_days": days}
+        p = _require_pipeline()
+        days = p.run_auto()
+        snap = p.progress_snapshot()
+        return {"ok": True, "queued_days": days,
+                "last_scan_result": snap["last_scan_result"],
+                "days_detail": p.days_detail()}
 
     @app.get("/api/v1/pipeline/status")
     def pipeline_status() -> dict:
         p = _require_pipeline()
+        snap = p.progress_snapshot()
+        detail = p.days_detail()
         return {
             "pending_days": p.pending_days(),
             "historical_days": p.historical_days(),
             "current_day": p.current_day,
+            "current": snap["current"],
+            "progress": snap["progress"],
+            "queue": snap["queue"],
+            "queue_len": len(snap["queue"]),
+            "days_detail": detail,
+            "last_scan_at": snap["last_scan_at"],
+            "last_scan_result": snap["last_scan_result"],
             "auto_transcribe_since": cfg.auto_transcribe_since,
             "provider": p.engines.provider_used,
+            "engines_ready": _models_ready(cfg),
         }
+
+    @app.post("/api/v1/pipeline/recover")
+    def pipeline_recover() -> dict:
+        """把中断遗留的 processing 行复位，返回复位数量。"""
+        n = _require_pipeline().recover_stalled()
+        return {"ok": True, "recovered": n}
 
     @app.post("/api/v1/pipeline/run/{day}")
     def pipeline_run(day: str) -> dict:
-        """手动触发某日清洗（历史日期自动保留原 WAV）。"""
+        """手动触发某日清洗：仅入队，由单一工作线程串行执行。
+
+        历史日期自动保留原 WAV（keep_raw=True）。
+        """
         _valid_day(day)
         p = _require_pipeline()
-        if p.current_day == day:
-            return {"ok": True, "note": "该日期正在处理中"}
-        _threading.Thread(target=p.process_day, args=(day,),
-                          kwargs={"keep_raw": True}, daemon=True).start()
-        return {"ok": True, "note": "已启动（keep_raw=True，历史归档保留原 WAV）"}
+        res = p.queue_day(day, keep_raw=True, reason="manual")
+        detail = p.day_detail(day)
+        notes = {
+            "queued": f"{day} 已加入队列（第 {res.get('position')} 位），将保留原始 WAV",
+            "already_queued": f"{day} 已在队列中（第 {res.get('position')} 位）",
+            "already_processing": f"{day} 正在处理中",
+        }
+        return {"ok": True, "result": res["status"], "day": day,
+                "detail": detail, "note": notes.get(res["status"], "")}
 
     @app.get("/api/v1/day/{day}/timeline")
     def day_timeline(day: str) -> dict:

@@ -242,9 +242,24 @@ async function refreshPipeline(){
   try {
     const p = await api('/api/v1/pipeline/status');
     const b = $('pipeBadge');
-    if (p.current_day) { b.textContent = `流水线：处理 ${p.current_day}`; b.className = 'badge warn'; }
-    else if (p.pending_days.length) { b.textContent = `流水线：${p.pending_days.length} 天待处理`; b.className = 'badge warn'; }
-    else { b.textContent = '流水线：空闲'; b.className = 'badge'; }
+    const pg = p.progress || {};
+    if (p.current_day) {
+      const pct = pg.percent || 0;
+      b.textContent = `流水线：${p.current_day} · ${pg.stage_label || '准备'} ${pg.file_total ? pg.file_index + '/' + pg.file_total : ''} ${pct}%`;
+      b.className = 'badge warn';
+      b.title = `${pg.file_name || ''}（${pct}%）`;
+    } else if (p.pending_days.length) {
+      b.textContent = `流水线：${p.pending_days.length} 天待处理`;
+      b.className = 'badge warn';
+      b.title = p.pending_days.join('、');
+    } else if (p.queue_len) {
+      b.textContent = `流水线：队列 ${p.queue_len} 天`;
+      b.className = 'badge warn';
+    } else {
+      b.textContent = '流水线：空闲';
+      b.className = 'badge';
+      b.title = '';
+    }
   } catch(e) {}
 }
 
@@ -409,27 +424,114 @@ function renderTimeline(){
        ${f.compressed_path ? '' : '<span class="tag">已瘦身/未压缩</span>'}${f.error ? `<span class="tag" style="color:var(--err)">${esc(f.error)}</span>` : ''}</div></div>`).join('')}</div>`;
 }
 function renderLog(){
-  return `<div class="card"><h4>流水线</h4><div id="pipeBox">加载中…</div></div>
-   <div class="card"><h4>事件日志（实时轮询）</h4><div id="logBox">加载中…</div></div>`;
+  return `<div class="card"><h4>流水线运行状态</h4><div id="pipeBox">加载中…</div></div>
+   <div class="card"><h4>各日处理进度</h4><div id="daysBox">加载中…</div></div>
+   <div class="card"><h4>事件日志（每 3 秒刷新）</h4><div id="logBox">加载中…</div></div>`;
+}
+
+/* ---- 流水线进度条 ---- */
+function progressBar(pct, color){
+  pct = Math.max(0, Math.min(100, pct || 0));
+  return `<div style="height:8px; border-radius:999px; background:var(--panel2);
+      border:1px solid var(--line); overflow:hidden; margin:8px 0 6px">
+      <div style="height:100%; width:${pct}%; background:${color}; transition:width .4s"></div></div>`;
+}
+function stateChip(d){
+  if (d.pending === 0) return `<span class="chip" style="color:var(--ok);border-color:var(--ok)">已完成</span>`;
+  if (d.processing) return `<span class="chip" style="color:var(--warn);border-color:var(--warn)">处理中</span>`;
+  if (d.failed) return `<span class="chip" style="color:var(--err);border-color:var(--err)">有失败</span>`;
+  return `<span class="chip">待处理</span>`;
 }
 async function bindDayEvents(day){
-  if (activeTab === 'log') {
-    try {
-      const p = await api('/api/v1/pipeline/status');
-      const box = $('pipeBox');
-      if (box) box.innerHTML = `当前：<b>${esc(p.current_day || '空闲')}</b> · 待处理：${p.pending_days.length} 天
-        （${esc(p.pending_days.join(', ') || '无')}）· 引擎：${esc(p.provider || '未加载')}<br>
-        <button class="small" onclick="api('/api/v1/pipeline/scan',{method:'POST'}).then(()=>toast('已触发扫描','ok')).catch(e=>toast(e,'err'))">立即扫描补全</button>
-        ${p.historical_days.map(d => ` <button class="small" onclick="manualTranscribe('${d}')">✍️ ${d}</button>`).join('')}`;
-    } catch(e) {}
-    const lb = $('logBox');
-    if (lb) {
-      const lg = await api('/api/v1/ingest/log?limit=60').catch(()=>({log:[]}));
-      lb.innerHTML = lg.log.map(e =>
-        `<div class="logline"><span class="ts">${e.ts}</span> <span class="topic">${esc(e.topic)}</span> ${esc(JSON.stringify(e.data).slice(0,150))}</div>`).join('')
-        || '<div class="hint">暂无事件</div>';
+  if (activeTab !== 'log') return;
+  let p = null;
+  try { p = await api('/api/v1/pipeline/status'); } catch(e) {}
+  const box = $('pipeBox');
+  if (box && p) {
+    const pg = p.progress || {};
+    const cur = p.current;
+    let main = '';
+    if (cur) {
+      const pct = pg.percent || 0;
+      main = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <b style="font-size:16px">正在处理 ${esc(cur.day)}</b>
+          <span class="chip" style="color:var(--accent)">${esc(pg.stage_label || '准备中')}</span>
+          ${pg.file_total ? `<span class="chip">文件 ${pg.file_index}/${pg.file_total}</span>` : ''}
+          <span style="color:var(--muted);font-size:12px">来源：${cur.reason === 'manual' ? '手动触发' : '自动补全'}${cur.keep_raw ? ' · 保留原始 WAV' : ''}</span>
+        </div>
+        ${progressBar(pct, 'var(--accent)')}
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted)">
+          <span>${esc(pg.file_name || '')}${pg.extra ? ' · ' + esc(pg.extra) : ''}</span><b style="color:var(--text)">${pct}%</b></div>
+        ${pg.updated_at ? `<div class="hint">最近更新 ${esc(pg.updated_at)} · 开始于 ${esc(pg.started_at || '-')}</div>` : ''}`;
+    } else {
+      main = `<div style="display:flex;align-items:center;gap:10px"><b style="font-size:16px">流水线空闲</b>
+        <span class="chip" style="color:var(--ok);border-color:var(--ok)">无正在运行的任务</span></div>`;
     }
+    const q = p.queue || [];
+    const queueHtml = q.length
+      ? `<div class="hint" style="margin-top:10px">队列 ${q.length} 天：` + q.map(x =>
+          `<span class="chip">${x.position}. ${esc(x.day)}${x.reason === 'manual' ? '（手动）' : ''}</span>`).join(' ') + `</div>`
+      : `<div class="hint" style="margin-top:10px">队列为空</div>`;
+    const pending = p.pending_days || [];
+    const scanInfo = p.last_scan_at
+      ? `<div class="hint">上次扫描 ${esc(p.last_scan_at)} · ${esc((p.last_scan_result||{}).note || '')}</div>`
+      : `<div class="hint">尚未扫描</div>`;
+    const engineChip = p.engines_ready
+      ? `<span class="chip" style="color:var(--ok);border-color:var(--ok)">引擎就绪 (${esc(p.provider || 'cpu')})</span>`
+      : `<span class="chip" style="color:var(--err);border-color:var(--err)">模型缺失</span>`;
+    box.innerHTML = `${main}${queueHtml}
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:14px">
+        ${engineChip}
+        <span class="chip">待处理 ${pending.length} 天</span>
+        <span class="chip">分界线 ${esc(p.auto_transcribe_since)}</span>
+        <button class="small primary" onclick="scanPipeline(this)">🔍 立即扫描补全</button>
+        <button class="small" onclick="recoverPipeline()">🩹 修复卡住的文件</button>
+      </div>
+      ${scanInfo}`;
   }
+  const days = (p && p.days_detail) || [];
+  const db = $('daysBox');
+  if (db) {
+    db.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="color:var(--muted);text-align:left">
+        <th style="padding:6px 4px">日期</th><th>文件</th><th>进度</th><th>转写段</th><th>状态</th><th>操作</th>
+      </tr></thead><tbody>` + days.map(d => `<tr style="border-top:1px dashed var(--line)">
+        <td style="padding:7px 4px"><b>${esc(d.day)}</b>${d.historical ? '<span class="chip" style="margin-left:6px">历史归档</span>' : ''}</td>
+        <td>${d.done}/${d.files}</td>
+        <td style="min-width:110px">${progressBar(d.percent, d.pending ? 'var(--warn)' : 'var(--ok)')}</td>
+        <td>${d.segments}</td><td>${stateChip(d)}</td>
+        <td>${d.pending ? `<button class="small" onclick="manualTranscribe('${d.day}')">✍️ 处理</button>` : ''}
+            ${d.failed ? `<button class="small" onclick="manualTranscribe('${d.day}')">↻ 重试</button>` : ''}</td>
+      </tr>`).join('') + `</tbody></table>`;
+  }
+  const lb = $('logBox');
+  if (lb) {
+    const lg = await api('/api/v1/ingest/log?limit=60').catch(()=>({log:[]}));
+    lb.innerHTML = lg.log.map(e =>
+      `<div class="logline"><span class="ts">${e.ts}</span> <span class="topic">${esc(e.topic)}</span> ${esc(JSON.stringify(e.data).slice(0,150))}</div>`).join('')
+      || '<div class="hint">暂无事件</div>';
+  }
+}
+async function scanPipeline(btn){
+  const t = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ 扫描中…';
+  try {
+    const r = await api('/api/v1/pipeline/scan', {method:'POST'});
+    const note = (r.last_scan_result || {}).note || '扫描完成';
+    const days = r.queued_days || [];
+    toast(days.length ? `${note}（${days.join('、')}）` : note, 'ok');
+    if (days.length) pickDay(days[0]); // 跳最新一天，立刻看到结果
+  } catch(e) { toast('扫描失败：' + e, 'err'); }
+  btn.disabled = false; btn.textContent = t;
+  bindDayEvents(curDay);
+}
+async function recoverPipeline(){
+  try {
+    const r = await api('/api/v1/pipeline/recover', {method:'POST'});
+    toast(r.recovered ? `已复位 ${r.recovered} 个卡住的文件，正在重新排队` : '没有卡住的文件', 'ok');
+    await api('/api/v1/pipeline/scan', {method:'POST'});
+  } catch(e) { toast('修复失败：' + e, 'err'); }
+  bindDayEvents(curDay);
 }
 
 /* ================= 说话人 / 试听 / 星标 / 查歌 ================= */
@@ -671,6 +773,9 @@ async function refreshApiBtn(){
 }
 const now = new Date(); calY = now.getFullYear(); calM = now.getMonth();
 refreshStatus(); refreshPipeline(); refreshDays(); refreshApiBtn();
-setInterval(() => { refreshStatus(); refreshPipeline(); refreshDays(); if (activeTab === 'log') bindDayEvents(curDay); }, 5000);
+setInterval(() => {
+  refreshStatus(); refreshPipeline(); refreshDays();
+  if (activeTab === 'log') bindDayEvents(curDay);
+}, 3000);
 </script>
 </body></html>
