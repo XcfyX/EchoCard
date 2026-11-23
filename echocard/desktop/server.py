@@ -29,6 +29,7 @@ EDITABLE_FIELDS = {
     "proxy_url", "watched_photo_dirs", "auto_music_recognition", "theme",
     "export_prompt", "auto_transcribe_since", "auto_pipeline",
     "pipeline_provider", "cluster_distance_threshold", "cleanup_after_summary",
+    "speaker_match_high", "speaker_match_mid",
 }
 
 
@@ -52,6 +53,8 @@ class ConfigPatch(BaseModel):
     pipeline_provider: str | None = None
     cluster_distance_threshold: float | None = None
     cleanup_after_summary: bool | None = None
+    speaker_match_high: float | None = None
+    speaker_match_mid: float | None = None
 
 
 class RenameBody(BaseModel):
@@ -278,22 +281,43 @@ def create_app(
         files = [dict(r) for r in db.query(
             "SELECT id, status, size_bytes, compressed_path, raw_path, error, deleted_on_device"
             " FROM ingest_files WHERE recorded_at=?", (day,))]
-        # 说话人视图（当日聚类去重 + 代表切片）
+        # 说话人视图：按「显示名」聚合（合并后同一人只出现一次），
+        # 并保留其 cluster 编号供改名/合并 API 使用
         speakers: dict[int, dict] = {}
         for seg in db.query(
             "SELECT cluster_id, speaker_name, speaker_match_score, segment_path"
-            " FROM audio_segments WHERE day=? AND cluster_id IS NOT NULL", (day,)
+            " FROM audio_segments WHERE day=? AND cluster_id IS NOT NULL ORDER BY cluster_id",
+            (day,)
         ):
             cid = seg["cluster_id"]
             view = speakers.setdefault(cid, {
                 "cluster_id": cid, "display": seg["speaker_name"],
                 "score": seg["speaker_match_score"], "clips": [], "segments": 0})
+            if seg["speaker_name"] and not view["display"]:
+                view["display"] = seg["speaker_name"]
             view["segments"] += 1
             if seg["segment_path"] and seg["segment_path"] not in view["clips"]:
                 view["clips"].append(seg["segment_path"])
+        # 不同 cluster 若已合并成同名，UI 侧只保留一段显示（拼接片段数量）
+        merged_views: list[dict] = []
+        by_display: dict[str, dict] = {}
+        for v in sorted(speakers.values(), key=lambda x: -x["segments"]):
+            disp = v["display"] or f"说话人 {v['cluster_id']}"
+            if disp in by_display:
+                by_display[disp]["segments"] += v["segments"]
+                by_display[disp]["clip_paths"].extend(v["clips"])
+                by_display[disp]["aliases"].append(v["cluster_id"])
+            else:
+                v["clip_paths"] = list(v["clips"])
+                v["aliases"] = [v["cluster_id"]]
+                by_display[disp] = v
+                merged_views.append(v)
+        for v in merged_views:
+            v["clips"] = v["clip_paths"]
+            v.pop("clip_paths", None)
         return {"day": day, "segments": segments, "music": music,
                 "photos": photos, "files": files,
-                "speakers": sorted(speakers.values(), key=lambda v: v["cluster_id"]),
+                "speakers": merged_views,
                 "summary": None}
 
     @app.post("/api/v1/day/{day}/speakers/{cluster_id}/rename")
@@ -528,7 +552,8 @@ def create_app(
     @app.get("/api/v1/audio/clip")
     def audio_clip(day: str, name: str) -> FileResponse:
         _valid_day(day)
-        if not _re.fullmatch(r"speaker\d+_\d+\.wav", name):
+        # 切片名可能是 speakerN_M.wav（系统生成）或「人名_M.wav」（改名后）
+        if not _re.fullmatch(r"[^\\/:*?\"<>|]{1,80}\.wav", name or ""):
             raise HTTPException(400, "非法切片名")
         path = cfg.subdir("audio", day, "clips") / name
         if not path.exists():

@@ -52,6 +52,15 @@ def _hms(dt: datetime) -> str:
     return dt.strftime("%H:%M:%S")
 
 
+_INVALID_FS_CHARS = set('\\/:*?"<>|')
+
+
+def _safe_name(name: str) -> str:
+    """把人名转成安全的文件名前缀（保留中文，剔除文件系统非法字符）。"""
+    cleaned = "".join(c for c in name if c not in _INVALID_FS_CHARS).strip()
+    return cleaned or "speaker"
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -383,41 +392,59 @@ class Pipeline:
                     seg.embedding = self.engines.embedding(
                         samples[int(seg.start_s * rate):int(seg.end_s * rate)])
 
-            # ---- 3. 当日无监督聚类（新编号顺延既有编号，避免与保留分段冲突）----
+            # ---- 3. 当日全局聚类（同一天所有文件的片段一起聚类，编号唯一）----
             self._stage("cluster")
-            diarize.cluster_segments(speech_all, self.cfg.cluster_distance_threshold)
             fids = list(file_info)
+            in_clause = ",".join(str(int(x)) for x in fids)
+            # 已保留分段（本次不处理的文件）的最大编号：新编号顺延，避免冲突
             existing_max = self.db.query_one(
-                "SELECT MAX(cluster_id) m FROM audio_segments"
-                " WHERE day=? AND file_id NOT IN (%s)" % ",".join(str(int(x)) for x in fids),
-                (day,))["m"] or 0
+                f"SELECT MAX(cluster_id) m FROM audio_segments"
+                f" WHERE day=? AND file_id NOT IN ({in_clause})", (day,))["m"] or 0
+            groups = diarize.cluster_segments(
+                speech_all, self.cfg.cluster_distance_threshold,
+                start_id=(existing_max + 1) if existing_max else 1)
             if existing_max:
-                for seg in speech_all:
-                    if seg.cluster_id is not None:
-                        seg.cluster_id += existing_max
-                log.info("%s 已有保留分段（最大聚类 %d），新聚类编号顺延", day, existing_max)
+                log.info("%s 已有保留分段（最大聚类 %d），新聚类编号从 %d 起",
+                         day, existing_max, existing_max + 1)
 
             speakers_view: dict[int, dict] = {}
-            for cid in sorted({s.cluster_id for s in speech_all if s.cluster_id}):
+            for cid in sorted(groups):
                 name, score, status = None, None, "unmatched"
                 centroid = diarize.cluster_centroid(speech_all, cid)
                 if centroid is not None:
-                    name, score, status = diarize.soft_match(self.db, centroid)
+                    name, score, status = diarize.soft_match(
+                        self.db, centroid,
+                        high=self.cfg.speaker_match_high, mid=self.cfg.speaker_match_mid)
                 speakers_view[cid] = {
                     "cluster_id": cid, "name": name, "status": status,
                     "score": round(score, 4) if score is not None else None,
                     "display": self._display_name(cid, name, status),
+                    "segments": len(groups[cid]),
                 }
             reps = {cid: diarize.pick_representative(speech_all, cid, count=3)
                     for cid in speakers_view}
 
             # ---- 4. 写库：仅替换本次处理文件的分段（已 done 文件的分段保留）----
             self._stage("write")
-            in_clause = ",".join(str(int(x)) for x in fids)
             self.db.execute(
                 f"DELETE FROM audio_segments WHERE day=? AND file_id IN ({in_clause})", (day,))
             emb_store: dict[int, np.ndarray] = {}
             clips_dir = self.cfg.subdir("audio", day, "clips")
+            # 清理本次涉及聚类的旧代表切片：重处理会产生新的优质切片，
+            # 旧文件留盘会被 UI 当成有效切片播放（表现为「改名后试听错乱/播不出来」）
+            stale_ids = set(speakers_view)
+            for r in self.db.query(
+                    "SELECT DISTINCT cluster_id FROM audio_segments WHERE day=?"
+                    f" AND file_id IN ({in_clause}) AND cluster_id IS NOT NULL", (day,)):
+                stale_ids.add(r["cluster_id"])
+            for cid in stale_ids:
+                if cid is None:
+                    continue
+                for p in clips_dir.glob(f"speaker{cid}_*.wav"):
+                    p.unlink(missing_ok=True)
+                # 已改名聚类按人名命名的切片同样失效，一并清理
+                for p in clips_dir.glob(f"*_{cid}.wav"):
+                    p.unlink(missing_ok=True)
             for fid, (wav16k, start_dt, _raw) in file_info.items():
                 for seg in sorted([s for s in speech_all if s.file_id == fid],
                                   key=lambda s: s.start_s):
@@ -425,14 +452,15 @@ class Pipeline:
                     en = start_dt + timedelta(seconds=seg.end_s)
                     view = speakers_view.get(seg.cluster_id, {})
                     clip_path = None
-                    if seg.cluster_id in reps and seg in reps[seg.cluster_id]:
-                        idx = reps[seg.cluster_id].index(seg) + 1
+                    if seg.cluster_id in reps and any(seg is r for r in reps[seg.cluster_id]):
+                        idx = next(i for i, r in enumerate(reps[seg.cluster_id], 1) if r is seg)
                         cpath = clips_dir / f"speaker{seg.cluster_id}_{idx}.wav"
                         try:
                             slice_wav(str(wav16k), str(cpath), seg.start_s, seg.end_s)
                             clip_path = str(cpath)
                         except Exception:
-                            log.warning("代表切片失败 cluster=%s", seg.cluster_id, exc_info=True)
+                            log.warning("代表切片失败 cluster=%s seg=[%.1f-%.1f]",
+                                        seg.cluster_id, seg.start_s, seg.end_s, exc_info=True)
                     cur = self.db.execute(
                         "INSERT INTO audio_segments(file_id, day, start_ts, end_ts,"
                         " start_offset, end_offset, text, cluster_id, speaker_name,"
@@ -539,8 +567,34 @@ class Pipeline:
             return datetime.now()
 
     # ---------------------------------------------------------------- UI 联动
+    def _refresh_clips_for_name(self, day: str, cluster_id: int, display: str) -> str | None:
+        """改名/合并后把代表切片改成按「显示名」命名，保证改名后仍可试听。
+
+        UI 按「日」聚合切片（clips 列表来自 DB segment_path），因此这里同时
+        重命名磁盘文件与 DB 记录，二者必须一致，否则播放会 404。
+        """
+        clips_dir = self.cfg.subdir("audio", day, "clips")
+        src_clips = sorted(clips_dir.glob(f"speaker{cluster_id}_*.wav"))
+        if not src_clips:
+            return None
+        safe = _safe_name(display)
+        mapping: dict[Path, Path] = {}
+        for i, p in enumerate(src_clips, 1):
+            dst = clips_dir / f"{safe}_{i}.wav"
+            try:
+                p.replace(dst)
+                mapping[p] = dst
+            except OSError:
+                log.warning("改名切片失败：%s → %s", p, dst, exc_info=True)
+        # 按 DB 里的精确旧路径重写，避免前缀 LIKE 误伤（speaker1_ 会匹配 speaker11_）
+        for old, new in mapping.items():
+            self.db.execute(
+                "UPDATE audio_segments SET segment_path=? WHERE day=? AND segment_path=?",
+                (str(new), day, str(old)))
+        return str(next(iter(mapping.values()))) if mapping else None
+
     def rename_speaker(self, day: str, cluster_id: int, new_name: str) -> int:
-        """改名即学：更新该日称呼 → 抽取该聚类优质切片 Embedding 更新声纹库。"""
+        """改名即学：更新该日称呼 → 重建代表切片名 → 抽取 Embedding 更新声纹库。"""
         rows = self.db.query(
             "SELECT id FROM audio_segments WHERE day=? AND cluster_id=?", (day, cluster_id))
         seg_ids = [r["id"] for r in rows]
@@ -554,21 +608,72 @@ class Pipeline:
         self.db.execute(
             "UPDATE audio_segments SET speaker_name=? WHERE day=? AND cluster_id=?",
             (new_name, day, cluster_id))
+        clip = self._refresh_clips_for_name(day, cluster_id, new_name)
         self._publish("speaker.renamed",
                       {"day": day, "cluster": cluster_id, "name": new_name,
-                       "learned": learned})
+                       "learned": learned, "clip": clip})
         return learned
 
     def merge_speakers(self, day: str, keep_id: int, gone_id: int,
                        name: str | None = None) -> int:
-        """合并被拆散的两个聚类，可选合并后命名并学习。"""
+        """合并被拆散的两个聚类。
+
+        命名优先级：显式 name > keep 侧已有人名 > gone 侧已有人名 > 保持中性编号。
+        （此前按调用方传入的 keep_id 固定取名字，导致「合并后变成说话人 N」）
+        """
+        if name:
+            final_name = name
+        else:
+            # 优先沿用已命名的一侧（人名优先于中性「说话人 X」）
+            names: list[tuple[int, str]] = []
+            for cid in (keep_id, gone_id):
+                row = self.db.query_one(
+                    "SELECT speaker_name FROM audio_segments WHERE day=? AND cluster_id=?"
+                    " AND speaker_name IS NOT NULL AND speaker_name != ''"
+                    " LIMIT 1", (day, cid))
+                if row and row["speaker_name"]:
+                    names.append((cid, row["speaker_name"]))
+            human = [(cid, n) for cid, n in names if not n.startswith("说话人")]
+            # 若两侧都已命名且不同，保留片段更多的那个
+            if human:
+                if len(human) == 2 and human[0][1] != human[1][1]:
+                    counts = {cid: self.db.query_one(
+                        "SELECT COUNT(*) c FROM audio_segments WHERE day=? AND cluster_id=?",
+                        (day, cid))["c"] for cid, _ in human}
+                    final_name = max(human, key=lambda x: counts[x[0]])[1]
+                else:
+                    final_name = human[0][1]
+            else:
+                final_name = names[0][1] if names else None
+
+        moved = self.merge_speakers_rows(day, keep_id, gone_id, final_name)
+        if final_name:
+            self._refresh_clips_for_name(day, keep_id, final_name)
+            # 合并后以最终名字再学一次声纹（等价于「改名即学」）
+            try:
+                self.rename_speaker(day, keep_id, final_name)
+            except Exception:
+                log.warning("合并后声纹学习失败", exc_info=True)
+        self._publish("speaker.merged",
+                      {"day": day, "keep": keep_id, "gone": gone_id,
+                       "moved": moved, "name": final_name})
+        return moved
+
+    def merge_speakers_rows(self, day: str, keep_id: int, gone_id: int,
+                            display: str | None) -> int:
+        """把 gone_id 的分段并入 keep_id（含旧切片清理与称呼统一）。"""
         self.db.execute(
             "UPDATE audio_segments SET cluster_id=? WHERE day=? AND cluster_id=?",
             (keep_id, day, gone_id))
+        if display:
+            self.db.execute(
+                "UPDATE audio_segments SET speaker_name=? WHERE day=? AND cluster_id=?",
+                (display, day, keep_id))
         moved = self.db.query_one(
             "SELECT COUNT(*) c FROM audio_segments WHERE day=? AND cluster_id=?",
             (day, keep_id))["c"]
-        learned = self.rename_speaker(day, keep_id, name) if name else 0
-        self._publish("speaker.merged",
-                      {"day": day, "keep": keep_id, "gone": gone_id, "moved": moved})
-        return learned
+        # 清理被并聚类的切片文件（其内容已由 keep 侧代表）
+        clips_dir = self.cfg.subdir("audio", day, "clips")
+        for p in clips_dir.glob(f"speaker{gone_id}_*.wav"):
+            p.unlink(missing_ok=True)
+        return moved

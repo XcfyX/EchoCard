@@ -54,6 +54,9 @@ class AppConfig:
     auto_pipeline: bool = True            # 自动补全所有未处理日期（>= 分界线）
     pipeline_provider: str = "auto"       # auto(尝试CUDA，失败回退CPU) / cpu / cuda
     cluster_distance_threshold: float = 0.55  # CAM++ cosine 距离聚类阈值
+    # 声纹软匹配阈值（CAM++ 跨天跨佩戴同人常见 0.45~0.60，故低于规格书原值）
+    speaker_match_high: float = 0.62   # >= 直接显示人名
+    speaker_match_mid: float = 0.42    # >= 显示「疑似-XXX (说话人 N)」
     cleanup_after_summary: bool = False   # AI 总结归档后清理未星标压缩音频（默认关）
 
     # ---- UI（M4 使用）----

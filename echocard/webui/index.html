@@ -368,19 +368,27 @@ function renderReview(summary){
 function renderTimeline(){
   if (!TL) return '<div class="empty">该日期暂无清洗数据</div>';
   const sp = TL.speakers || [];
-  const capHtml = sp.map((v,i) => `
-    <div class="cap ${v.display && v.display.startsWith('疑似') ? 'suspect' : (v.display && !v.display.startsWith('说话人') ? 'matched' : '')}"
-         data-cid="${v.cluster_id}" onclick="capClick(${v.cluster_id}, this)">
-      <span class="nm">${esc(v.display || `说话人 ${v.cluster_id}`)}</span>
-      <span class="sc">${v.score ? (v.score*100).toFixed(0) + '%' : ''}</span>
-      ${v.clips && v.clips.length ? `<button class="small" onclick="event.stopPropagation(); playClips(${v.cluster_id})">▶ 试听</button>` : ''}
-      <button class="small" onclick="event.stopPropagation(); renameSpeaker(${v.cluster_id}, '${esc(v.display || '')}')">✏️</button>
-    </div>`).join('');
+  const capHtml = sp.map((v,i) => {
+    const disp = v.display || `说话人 ${v.cluster_id}`;
+    const isNamed = !disp.startsWith('说话人') && !disp.startsWith('疑似');
+    const aliases = v.aliases || [v.cluster_id];
+    const clipCount = (v.clips || []).length;
+    return `
+    <div class="cap ${disp.startsWith('疑似') ? 'suspect' : (isNamed ? 'matched' : '')}"
+         data-cid="${v.cluster_id}" title="${clipCount ? clipCount + ' 段代表原声' : '暂无代表切片'}${aliases.length > 1 ? ' · 已合并 ' + aliases.length + ' 个聚类' : ''}"
+         onclick="capClick(${v.cluster_id}, this)">
+      <span class="nm">${esc(disp)}</span>
+      <span class="sc">${v.score ? (v.score*100).toFixed(0) + '%' : ''}${aliases.length > 1 ? ' · ' + aliases.length + '段' : ''}</span>
+      ${clipCount ? `<button class="small" onclick="event.stopPropagation(); playClips('${encodeURIComponent(disp)}', ${JSON.stringify(aliases.join(','))})">▶ 试听</button>`
+                  : `<button class="small" disabled title="无代表切片">▶ 试听</button>`}
+      <button class="small" onclick="event.stopPropagation(); renameSpeaker(${aliases.join('|')}, '${esc(disp)}')">✏️</button>
+    </div>`;
+  }).join('');
   const mergeMode = window._mergePick && window._mergePick.length;
   const segs = TL.segments.map(s => `
     <div class="seg">
       <span class="t">${esc(s.start_ts)}–${esc(s.end_ts)}</span>
-      <div class="tx"><span class="sp">${esc(s.speaker_name || '说话人 ' + s.cluster_id)}</span> ${esc(s.text || '（无文本，纯音频段）')}
+      <div class="tx"><span class="sp">${esc(s.speaker_name || '（未归类音频）')}</span> ${esc(s.text || '（无文本，纯音频段）')}
         ${(JSON.parse(s.audio_tags||'[]')||[]).map(t => `<span class="tag">${esc(t)}</span>`).join('')}
         ${s.starred ? '<span class="tag" style="color:var(--warn)">⭐</span>' : ''}
       </div>
@@ -539,41 +547,73 @@ function capClick(cid, el){
   if (window._merging) {
     window._mergePick = window._mergePick || [];
     if (window._mergePick.includes(cid)) { window._mergePick = window._mergePick.filter(x => x !== cid); el.classList.remove('mergeA','mergeB'); }
-    else if (window._mergePick.length < 2) { window._mergePick.push(cid); el.classList.add(window._mergePick.length === 1 ? 'mergeA' : 'mergeB'); }
+    else if (window._mergePick.length < 6) { window._mergePick.push(cid); el.classList.add(window._mergePick.length === 1 ? 'mergeA' : 'mergeB'); }
     if (curDay) loadDay(curDay); window._merging = true;
   }
 }
 function toggleMerge(){ window._merging = !window._merging; window._mergePick = []; loadDay(curDay); }
 async function doMerge(){
-  if (!window._mergePick || window._mergePick.length !== 2) { toast('请先选中两个聚类胶囊', 'err'); return; }
-  const name = prompt('合并后命名为（留空保持 说话人 N）：');
+  if (!window._mergePick || window._mergePick.length < 2) { toast('请先选中至少两个聚类胶囊', 'err'); return; }
+  // 找出被选中的显示名，判断是否已有名字 → 默认沿用已命名的一个
+  const picked = window._mergePick;
+  const views = (TL.speakers || []);
+  const namedViews = views.filter(v => {
+    const disp = v.display || `说话人 ${v.cluster_id}`;
+    return (v.aliases || [v.cluster_id]).some(a => picked.includes(a))
+        && !disp.startsWith('说话人') && !disp.startsWith('疑似');
+  });
+  const suggest = namedViews.length ? namedViews[0].display : '';
+  const name = prompt(
+    suggest
+      ? `合并后沿用已命名的「${suggest}」？可改名（留空即沿用）：`
+      : '合并后命名为（留空保持 说话人 N）：',
+    suggest);
+  // name === null 表示取消；'' 表示沿用建议值/保持中性
+  if (name === null) return;
+  const finalName = name || suggest || null;
+  const keep = picked[0];
   try {
-    await api(`/api/v1/day/${curDay}/speakers/merge`, {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({keep_id: window._mergePick[0], gone_id: window._mergePick[1], name: name || null})});
-    toast('聚类已合并，声纹库已更新 ✅', 'ok');
+    for (const gone of picked.slice(1)) {
+      await api(`/api/v1/day/${curDay}/speakers/merge`,
+        {method:'POST', headers:{'Content-Type':'application/json'},
+         body: JSON.stringify({keep_id: keep, gone_id: gone, name: finalName})});
+    }
+    toast(`已合并 ${picked.length} 个聚类${finalName ? `为「${finalName}」` : ''}，声纹库已更新 ✅`, 'ok');
   } catch(e) { toast(String(e), 'err'); }
   window._merging = false; window._mergePick = []; loadDay(curDay);
 }
-async function renameSpeaker(cid, current){
-  const name = prompt(`将「${current}」改名为（改名即学声纹）：`, current && !current.startsWith('说话人') && !current.startsWith('疑似') ? current : '');
+async function renameSpeaker(cids, current){
+  // cids 可能是 '14' 或 '14|2'（已合并的多个聚类一起改名）
+  const cidList = String(cids).split('|').map(x => parseInt(x, 10)).filter(x => !isNaN(x));
+  const named = current && !current.startsWith('说话人') && !current.startsWith('疑似');
+  const name = prompt(`将「${current}」改名为（改名即学声纹，作用于 ${cidList.length} 个聚类）：`,
+                      named ? current : '');
   if (!name) return;
+  let learned = 0;
   try {
-    const r = await api(`/api/v1/day/${curDay}/speakers/${cid}/rename`, {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
-    toast(`已改名并学习 ${r.learned_samples} 条声纹样本 ✅`, 'ok');
+    for (const cid of cidList) {
+      const r = await api(`/api/v1/day/${curDay}/speakers/${cid}/rename`,
+        {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
+      learned += (r.learned_samples || 0);
+    }
+    toast(`已改名为「${name}」，学习 ${learned} 条声纹样本 ✅`, 'ok');
   } catch(e) { toast(String(e), 'err'); }
-  loadDay(curDay);
+  loadDay(curDay); setTimeout(() => refreshDays(), 600);
 }
 function playSeg(id){ const p = $('player'); p.src = `/api/v1/audio/segment/${id}`; p.play(); }
-function playClips(cid){
-  const sp = (TL.speakers || []).find(s => s.cluster_id === cid);
-  if (!sp || !sp.clips || !sp.clips.length) return;
+function playClips(dispEnc, aliasCsv){
+  const disp = decodeURIComponent(dispEnc);
+  const v = (TL.speakers || []).find(s => (s.display || `说话人 ${s.cluster_id}`) === disp);
+  const clips = (v && (v.clips || []).length) ? v.clips : [];
+  if (!clips.length) { toast('该说话人暂无代表原声（可能刚改名或切片已清理）', 'err'); return; }
   const p = $('player'); let i = 0;
-  const names = sp.clips.map(x => x.split(/[\\/]/).pop());
+  const names = clips.map(x => String(x).split(/[\\/]/).pop());
   const playNext = () => {
-    if (i >= names.length) return;
+    if (i >= names.length) { p.onended = null; return; }
     p.src = `/api/v1/audio/clip?day=${curDay}&name=${encodeURIComponent(names[i])}`;
-    p.play(); i++; p.onended = playNext;
+    p.onerror = () => { toast(`切片播放失败：${names[i]}`, 'err'); i++; playNext(); };
+    p.play().catch(() => { i++; playNext(); });
+    i++; p.onended = playNext;
   };
   playNext();
 }
