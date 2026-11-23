@@ -409,6 +409,14 @@ class Pipeline:
             groups = diarize.cluster_segments(
                 speech_all, self.cfg.cluster_distance_threshold,
                 start_id=(existing_max + 1) if existing_max else 1)
+            # 短句（<1s）无法可靠提声纹，按时间就近归入同文件的说话人，
+            # 避免时间轴出现大片「无说话人」空白（保留文本与客观标签不变）
+            short_assigned = diarize.assign_short_segments(speech_all)
+            if short_assigned:
+                groups = {}
+                for s in speech_all:
+                    if s.cluster_id is not None:
+                        groups.setdefault(s.cluster_id, []).append(s)
             if existing_max:
                 log.info("%s 已有保留分段（最大聚类 %d），新聚类编号从 %d 起",
                          day, existing_max, existing_max + 1)

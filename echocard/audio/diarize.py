@@ -36,8 +36,22 @@ def cluster_segments(segments: list[Segment], distance_threshold: float = 0.55,
         voiced[0].cluster_id = start_id
         return {start_id: [voiced[0]]}
     X = np.stack([s.embedding for s in voiced]).astype(np.float32)
-    X /= (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+    # 归一化前先剔除零向量/非有限值（否则 cosine 距离为 NaN，linkage 直接崩）
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    keep = (norms > 1e-6).ravel() & np.isfinite(X).all(axis=1)
+    if keep.sum() < 1:
+        return {}
+    if keep.sum() == 1:
+        for s, ok in zip(voiced, keep):
+            if ok:
+                s.cluster_id = start_id
+        return {start_id: [s for s, ok in zip(voiced, keep) if ok]}
+    X = X[keep]
+    X /= np.linalg.norm(X, axis=1, keepdims=True)
+    voiced = [s for s, ok in zip(voiced, keep) if ok]
     D = pdist(X, metric="cosine")
+    if not np.isfinite(D).all():
+        D = np.nan_to_num(D, nan=1.0, posinf=1.0, neginf=1.0)
     Z = linkage(D, method="average")
     labels = fcluster(Z, t=distance_threshold, criterion="distance")
 
@@ -56,7 +70,43 @@ def cluster_segments(segments: list[Segment], distance_threshold: float = 0.55,
     return groups
 
 
+def assign_short_segments(segments: list[Segment], max_gap_s: float = 3.0) -> int:
+    """把过短（<1s，无法可靠提声纹）的片段归入同文件内时间上最近的已聚类说话人。
+
+    这些短句（"嗯"、"好"、"Oh"等）确实有人声，直接留空会让时间轴出现大片空白；
+    就近继承是保守且可解释的推断（只依赖时间邻接，不改动任何文本与客观标签）。
+    返回被归入的段数。
+    """
+    assigned = 0
+    for seg in segments:
+        if seg.cluster_id is not None or seg.embedding is not None:
+            continue
+        # 同文件内已聚类的候选：按中心距离排序
+        cands = [s for s in segments
+                 if s.file_id == seg.file_id and s.cluster_id is not None
+                 and s.duration >= 1.0]
+        if not cands:
+            continue
+        mid = (seg.start_s + seg.end_s) / 2
+        best, best_gap = None, float("inf")
+        for c in cands:
+            gap = 0.0
+            if mid < c.start_s:
+                gap = c.start_s - mid
+            elif mid > c.end_s:
+                gap = mid - c.end_s
+            if gap < best_gap:
+                best, best_gap = c, gap
+        if best is not None and best_gap <= max_gap_s:
+            seg.cluster_id = best.cluster_id
+            assigned += 1
+    if assigned:
+        log.info("短句就近归属：%d 段（间隔 ≤ %.1fs）", assigned, max_gap_s)
+    return assigned
+
+
 def cluster_centroid(segments: list[Segment], cluster_id: int) -> np.ndarray | None:
+    """某聚类的声纹中心（L2 归一化）；无向量时返回 None。"""
     embs = [s.embedding for s in segments
             if s.cluster_id == cluster_id and s.embedding is not None]
     if not embs:

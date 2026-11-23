@@ -63,7 +63,9 @@ DEFAULT_PROMPT = """\
 
 def _fetch_day(db: Database, day: str) -> dict:
     segments = [dict(r) for r in db.query(
-        "SELECT * FROM audio_segments WHERE day=? ORDER BY start_offset", (day,))]
+        # 按挂钟时间排序（start_offset 是文件内偏移，跨文件不可比）
+        "SELECT * FROM audio_segments WHERE day=?"
+        " ORDER BY start_ts, start_offset", (day,))]
     music = [dict(r) for r in db.query(
         "SELECT * FROM music_tracks WHERE day=? ORDER BY start_ts", (day,))]
     photos = [dict(r) for r in db.query(

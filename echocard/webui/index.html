@@ -388,7 +388,7 @@ function renderTimeline(){
   const segs = TL.segments.map(s => `
     <div class="seg">
       <span class="t">${esc(s.start_ts)}–${esc(s.end_ts)}</span>
-      <div class="tx"><span class="sp">${esc(s.speaker_name || '（未归类音频）')}</span> ${esc(s.text || '（无文本，纯音频段）')}
+      <div class="tx"><span class="sp">${esc(s.speaker_name || (s.cluster_id ? '说话人 ' + s.cluster_id : '（短句）'))}</span> ${esc(s.text || '（无文本，纯音频段）')}
         ${(JSON.parse(s.audio_tags||'[]')||[]).map(t => `<span class="tag">${esc(t)}</span>`).join('')}
         ${s.starred ? '<span class="tag" style="color:var(--warn)">⭐</span>' : ''}
       </div>

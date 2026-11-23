@@ -272,8 +272,10 @@ def create_app(
     @app.get("/api/v1/day/{day}/timeline")
     def day_timeline(day: str) -> dict:
         _valid_day(day)
+        # 按挂钟时间（HH:MM:SS）升序：start_offset 是「文件内偏移」，跨文件不可比
         segments = [dict(r) for r in db.query(
-            "SELECT * FROM audio_segments WHERE day=? ORDER BY start_offset", (day,))]
+            "SELECT * FROM audio_segments WHERE day=?"
+            " ORDER BY start_ts, start_offset", (day,))]
         music = [dict(r) for r in db.query(
             "SELECT * FROM music_tracks WHERE day=? ORDER BY start_ts", (day,))]
         photos = [dict(r) for r in db.query(
