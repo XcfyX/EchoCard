@@ -316,24 +316,27 @@ class Pipeline:
 
     def _process_day(self, day: str, keep_raw: bool, reason: str) -> dict:
         rows = self.db.query(
-            "SELECT id, raw_path, recorded_ts FROM ingest_files"
+            "SELECT id, raw_path, recorded_ts, compressed_path FROM ingest_files"
             " WHERE recorded_at=? AND status != 'done' ORDER BY id", (day,)
         )
         if not rows:
             return {"ok": True, "note": "no pending files"}
-        # 找回原始 WAV：此前瘦身过（原始已删）的文件无法重转，跳过并说明
-        runnable = []
+        # 可用输入：优先原始 WAV；已瘦身（原始已删）时退化为 Opus 解码重转
+        runnable: list[tuple] = []
         for r in rows:
-            p = Path(r["raw_path"]) if r["raw_path"] else None
-            if p and p.exists():
-                runnable.append(r)
+            raw_p = Path(r["raw_path"]) if r["raw_path"] else None
+            if raw_p and raw_p.exists():
+                runnable.append((r, raw_p, False))
+            elif r["compressed_path"] and Path(r["compressed_path"]).exists():
+                runnable.append((r, Path(r["compressed_path"]), True))
             else:
-                log.info("%s 原始 WAV 不存在（可能已瘦身），跳过", r["raw_path"])
+                log.info("%s 既无原始 WAV 也无 Opus，跳过", r["source"] if "source" in r.keys()
+                         else r["id"])
         if not runnable:
             self.db.execute(
                 "UPDATE ingest_files SET status='done' WHERE recorded_at=?"
                 " AND status='processing'", (day,))
-            return {"ok": True, "note": "无可用原始 WAV（均已瘦身），已标记完成"}
+            return {"ok": True, "note": "无可用输入（原始与 Opus 均已缺失），已标记完成"}
 
         with self._lock:
             self._current = {"day": day, "keep_raw": keep_raw, "reason": reason,
@@ -350,32 +353,35 @@ class Pipeline:
         try:
             # ---- 1. 转码 + 转写（逐文件汇报进度）----
             total = len(runnable)
-            for i, row in enumerate(runnable, 1):
+            for i, (row, src_path, from_opus) in enumerate(runnable, 1):
                 fid = row["id"]
-                raw = Path(row["raw_path"])
+                label = src_path.name
                 self.db.execute("UPDATE ingest_files SET status='processing' WHERE id=?", (fid,))
                 start_dt = self._file_start(row, day)
                 self._stage("transcribe", file_index=i - 1, file_total=total,
-                            file_name=raw.name)
+                            file_name=label)
                 try:
                     wav16k = to_16k_mono(
-                        raw, self.cfg.subdir("audio", day, "16k") / f"{raw.stem}.wav")
+                        src_path, self.cfg.subdir("audio", day, "16k")
+                        / f"{src_path.stem}.wav")
                     speech, music = transcribe_file(self.engines, str(wav16k), start_dt)
                     for s in [*speech, *music]:
                         s.file_id = fid
                     speech_all.extend(speech)
                     music_all.extend(music)
-                    file_info[fid] = (wav16k, start_dt, raw)
+                    file_info[fid] = (wav16k, start_dt, src_path)
+                    if from_opus:
+                        log.info("%s 从 Opus 解码重转写（原始 WAV 已瘦身）", label)
                 except Exception as e:
-                    log.exception("文件转写失败：%s", raw)
+                    log.exception("文件转写失败：%s", label)
                     self.db.execute(
                         "UPDATE ingest_files SET status='failed', error=? WHERE id=?",
                         (str(e)[:300], fid))
                     self._publish("pipeline.file_failed",
-                                  {"day": day, "file": raw.name, "error": str(e)[:200]})
-                    failed_files.append(raw.name)
+                                  {"day": day, "file": label, "error": str(e)[:200]})
+                    failed_files.append(label)
                 self._stage("transcribe", file_index=i, file_total=total,
-                            file_name=raw.name)
+                            file_name=label)
 
             if not file_info:
                 self._publish("pipeline.day_done",
@@ -490,19 +496,27 @@ class Pipeline:
 
             # ---- 6. Opus 瘦身 + 标记完成 ----
             n_opus = len(file_info)
-            for i, (fid, (wav16k, _s, raw)) in enumerate(file_info.items(), 1):
-                self._stage("opus", file_index=i, file_total=n_opus, file_name=raw.name)
-                opus = self.cfg.subdir("audio", day, "opus") / f"{raw.stem}.opus"
-                wav_to_opus(raw, opus)
+            from_opus_ids = {row["id"] for row, _s, is_opus in runnable if is_opus}
+            for i, (fid, (wav16k, _s, src_path)) in enumerate(file_info.items(), 1):
+                self._stage("opus", file_index=i, file_total=n_opus, file_name=src_path.name)
+                if fid in from_opus_ids:
+                    # 输入本就是 Opus（原始已瘦身）：无需再压，直接标记完成
+                    self.db.execute(
+                        "UPDATE ingest_files SET status='done', error=NULL WHERE id=?", (fid,))
+                    self._publish("pipeline.file_done",
+                                  {"day": day, "file": src_path.name, "opus": src_path.name})
+                    continue
+                opus = self.cfg.subdir("audio", day, "opus") / f"{src_path.stem}.opus"
+                wav_to_opus(src_path, opus)
                 self.db.execute(
                     "UPDATE ingest_files SET compressed_path=? WHERE id=?", (str(opus), fid))
                 if not keep_raw:
-                    raw.unlink(missing_ok=True)  # 已转写完成的本地副本，安全瘦身
+                    src_path.unlink(missing_ok=True)  # 已转写完成的本地副本，安全瘦身
                     wav16k.unlink(missing_ok=True)
                 self.db.execute(
                     "UPDATE ingest_files SET status='done', error=NULL WHERE id=?", (fid,))
                 self._publish("pipeline.file_done",
-                              {"day": day, "file": raw.name, "opus": opus.name})
+                              {"day": day, "file": src_path.name, "opus": opus.name})
         finally:
             with self._lock:
                 self._current = None

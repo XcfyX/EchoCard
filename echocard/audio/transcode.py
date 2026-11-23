@@ -47,16 +47,22 @@ def _run(args: list[str], timeout: int = 1800) -> None:
 
 
 def to_16k_mono(src: str | Path, dst: str | Path, normalize: bool = True) -> Path:
-    """原始 48kHz/32-bit float WAV → 16kHz 单声道 PCM16（含温和响度归一化）。"""
+    """原始 48kHz/32-bit float WAV → 16kHz 单声道 PCM16（含温和响度归一化）。
+
+    注意：若源本身已是 Opus/压缩件（重转写场景），**跳过 loudnorm**——
+    loudnorm 单遍处理超长压缩音频会异常退出（实测 exit 4294967294），
+    且压缩件本已是归一化后的产物，二次归一化既无必要又拖慢 20 倍。
+    """
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    src, _ = Path(src), Path(dst)
-    filters = NORMALIZE_FILTER if normalize else "anull"
+    src = Path(src)
+    already_compressed = src.suffix.lower() in {".opus", ".m4a", ".mp3", ".aac", ".ogg"}
+    filters = NORMALIZE_FILTER if (normalize and not already_compressed) else "anull"
     try:
         _run([ffmpeg_bin(), "-y", "-i", str(src), "-ac", "1", "-ar", "16000",
               "-af", filters, "-c:a", "pcm_s16le", str(dst)])
     except FfmpegError:
-        if not normalize:
+        if not filters or filters == "anull":
             raise
         # 极短/异常文件 loudnorm 可能失败：去滤波重试（反偏见：宁可无损也不丢音频）
         log.warning("loudnorm 失败，改用无归一化重试：%s", src)
