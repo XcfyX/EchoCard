@@ -746,6 +746,14 @@ async function openSettings(){
   <p class="hint">多个用英文逗号分隔（如 Syncthing 同步的相册目录），留空关闭</p>
   <div class="row"><label>网络代理</label><input id="sProxy" value="${esc(CFG.proxy_url)}"></div>
   <p class="hint">识曲与 API 总结使用；仅保存在本机配置，绝不进入仓库</p>
+  <div class="row"><label>说话人聚类阈值</label><input id="sCluster" type="number" step="0.01" min="0.3" max="0.95" value="${CFG.cluster_distance_threshold}"></div>
+  <p class="hint">余弦距离阈值：越小越细（0.55 常把一人拆成几十个碎片），0.70~0.75 通常对应一天 2~10 人</p>
+  <div class="row"><label>声纹匹配阈值</label>
+    <input id="sMatchHigh" type="number" step="0.01" min="0.3" max="0.99" value="${CFG.speaker_match_high}" style="max-width:80px">
+    <span class="hint" style="margin:0">高（直接显示人名） / </span>
+    <input id="sMatchMid" type="number" step="0.01" min="0.2" max="0.99" value="${CFG.speaker_match_mid}" style="max-width:80px">
+    <span class="hint" style="margin:0">中（显示疑似-XXX）</span></div>
+  <p class="hint">CAM++ 跨天跨佩戴同人常见 0.45~0.60，故中阈值建议 0.42、高阈值 0.62</p>
   <div class="row"><label>设备清空开关</label>
     <input type="checkbox" id="sDel" ${CFG.delete_after_verify ? 'checked' : ''} style="width:15px;height:15px">
     <span class="hint" style="margin:0">⚠️ 开启后：校验+落库成功即自动删除设备上的单个源文件</span></div>
@@ -772,6 +780,9 @@ async function saveSettings(){
   if (v('sSince')) patch.auto_transcribe_since = v('sSince');
   patch.watched_photo_dirs = v('sWatch') ? v('sWatch').split(',').map(x=>x.trim()).filter(Boolean) : [];
   if (v('sProxy') !== null) patch.proxy_url = v('sProxy');
+  if (v('sCluster')) patch.cluster_distance_threshold = parseFloat(v('sCluster'));
+  if (v('sMatchHigh')) patch.speaker_match_high = parseFloat(v('sMatchHigh'));
+  if (v('sMatchMid')) patch.speaker_match_mid = parseFloat(v('sMatchMid'));
   patch.delete_after_verify = $('sDel').checked;
   patch.cleanup_after_summary = $('sClean').checked;
   if (v('sApiBase')) patch.api_base_url = v('sApiBase');
